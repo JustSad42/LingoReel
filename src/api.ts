@@ -36,6 +36,8 @@ export type MediaReq = {
   plexId?: string;
   /** Series or folder this belongs to; audio choices are remembered per group. */
   group?: string;
+  /** Intro and credits ranges in seconds, when Plex has detected them. */
+  markers?: { type: string; start: number; end: number }[];
 };
 export type PrepareOpts = {
   target_lang: string;
@@ -150,6 +152,8 @@ export type Settings = {
   lastSource: unknown;
   /** Audio track chosen per series or folder. */
   audioPrefs: Record<string, string>;
+  /** Prepare the next episode in the background while watching. */
+  prepareNext: boolean;
   /** Japanese reading aid above each word: "romaji" | "kana" | "none" */
   reading: string;
   subSize: number;
@@ -182,6 +186,7 @@ export const DEFAULTS: Settings = {
   panel: "none",
   lastSource: null,
   audioPrefs: {},
+  prepareNext: true,
   reading: "romaji",
   subSize: 34,
   llmUrl: "",
@@ -523,9 +528,18 @@ export const plex = {
       `&X-Plex-Token=${p.token}`
     );
   },
+  /** The episode that follows this one in its series, or null (movies, last episode). */
+  async next(p: PlexConn, s: Settings, ratingKey: string): Promise<MediaReq | null> {
+    const md = (await plex.get(p, `/library/metadata/${ratingKey}`)).Metadata?.[0];
+    if (!md || md.type !== "episode" || !md.grandparentRatingKey) return null;
+    const all: any[] = (await plex.get(p, `/library/metadata/${md.grandparentRatingKey}/allLeaves`)).Metadata || [];
+    const i = all.findIndex((e) => String(e.ratingKey) === String(ratingKey));
+    const following = i >= 0 ? all[i + 1] : null;
+    return following ? plex.media(p, s, String(following.ratingKey)) : null;
+  },
   /** Everything needed to play and prepare one movie or episode. */
   async media(p: PlexConn, s: Settings, ratingKey: string): Promise<MediaReq> {
-    const mc = await plex.get(p, `/library/metadata/${ratingKey}`);
+    const mc = await plex.get(p, `/library/metadata/${ratingKey}?includeMarkers=1`);
     const md = mc.Metadata?.[0];
     const part = md?.Media?.[0]?.Part?.[0];
     if (!part) throw new Error("Plex has no playable file for this item.");
@@ -540,6 +554,9 @@ export const plex = {
       key: `plex-${ratingKey}`,
       plexId: String(ratingKey),
       group: `plex-${md.grandparentRatingKey || ratingKey}`,
+      markers: (md.Marker || [])
+        .filter((m: any) => m.type === "intro" || m.type === "credits")
+        .map((m: any) => ({ type: m.type, start: (m.startTimeOffset || 0) / 1000, end: (m.endTimeOffset || 0) / 1000 })),
       title,
       url: mapped ?? withToken(part.key),
       duration: (md.duration || 0) / 1000,

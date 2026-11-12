@@ -165,10 +165,9 @@ export default function App() {
 
   return (
     <AppCtx.Provider value={ctx}>
-      {playing ? (
-        <Player media={playing} onExit={() => setPlaying(null)} />
-      ) : (
-        <div className="shell">
+      {playing && <Player key={playing.key} media={playing} onExit={() => setPlaying(null)} />}
+      {
+        <div className="shell" style={{ display: playing ? "none" : undefined }}>
           <Backdrop />
           <nav className="rail">
             <img className="logo" src="/logo.png" alt="LingoReel" />
@@ -187,15 +186,22 @@ export default function App() {
               </button>
             )}
           </nav>
-          <main className="main" key={view}>
-            {view === "library" && <Library />}
-            {view === "review" && <Review />}
-            {view === "words" && <Words />}
-            {view === "setup" && <Setup onDone={() => setView("library")} />}
-            {view === "settings" && <SettingsView />}
+          <main className="main">
+            {/* The library stays loaded so returning to it is instant. */}
+            <div className="view" hidden={view !== "library"}>
+              <Library active={view === "library" && !playing} />
+            </div>
+            {view !== "library" && !playing && (
+              <div className="view enter" key={view}>
+                {view === "review" && <Review />}
+                {view === "words" && <Words />}
+                {view === "setup" && <Setup onDone={() => setView("library")} />}
+                {view === "settings" && <SettingsView />}
+              </div>
+            )}
           </main>
         </div>
-      )}
+      }
       {toastMsg && (
         <div className="toast" key={toastMsg}>
           {toastMsg}

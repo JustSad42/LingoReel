@@ -28,7 +28,7 @@ type Popup = {
 type Dictation = { cue: number; input: string; marks?: Mark[] };
 type Elsewhere = { items: Occurrence[]; idx: number; back: number; lemma: string };
 const SUB_MODES = ["full", "focus", "listen"];
-const SUB_MODE_LABEL: Record<string, string> = { full: "all words", focus: "focus", listen: "after hearing" };
+const SUB_MODE_LABEL: Record<string, string> = { full: "all", focus: "focus", listen: "after hearing" };
 type Shadow = {
   phase: "listen" | "record" | "scoring" | "result";
   cue: number;
@@ -73,7 +73,7 @@ function trackLabel(t: SubTrack): string {
 }
 
 export default function Player({ media, onExit }: { media: MediaReq; onExit: () => void }) {
-  const { settings, save, words, setWords, toast } = useApp();
+  const { settings, save, words, setWords, toast, play } = useApp();
   const lang = settings.targetLang;
 
   const [phase, setPhase] = useState<"loading" | "choose" | "preparing" | "playing">("loading");
@@ -103,6 +103,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const [dict, setDict] = useState<Dictation | null>(null);
   const [dictScore, setDictScore] = useState({ hits: 0, total: 0 });
   const [elsewhere, setElsewhere] = useState<Elsewhere | null>(null);
+  const [nextMedia, setNextMedia] = useState<MediaReq | null>(null);
+  const [nextReady, setNextReady] = useState(false);
+  const [offer, setOffer] = useState<"intro" | "next" | null>(null);
+  const [offerClosed, setOfferClosed] = useState(false);
+  const offerRef = useRef<"intro" | "next" | null>(null);
   const [popup, setPopup] = useState<Popup | null>(null);
   const [controls, setControls] = useState(true);
   const [reveal, setReveal] = useState(-1);
@@ -127,8 +132,8 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const popupPaused = useRef(false);
   const hideTimer = useRef<number>();
   const recorder = useRef<MediaRecorder | null>(null);
-  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere });
-  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere };
+  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia });
+  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia };
   const dictInput = useRef<HTMLInputElement>(null);
   const audioApplied = useRef(false);
   const volTimer = useRef<number>();
@@ -309,6 +314,21 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         return;
       }
       now.current = t;
+      {
+        // Offer to skip the intro, and to move on once the credits (or the last seconds) begin.
+        const marks = media.markers || [];
+        const length = live.current.duration;
+        const intro = marks.find((m) => m.type === "intro" && t >= m.start && t < m.end - 1);
+        const credits = marks.find((m) => m.type === "credits" && m.end >= length - 10);
+        let want: "intro" | "next" | null = null;
+        if (intro) want = "intro";
+        else if (live.current.nextMedia && length > 60 && t >= Math.min(credits ? credits.start : Infinity, length - 20)) want = "next";
+        if (want !== offerRef.current) {
+          offerRef.current = want;
+          setOffer(want);
+          setOfferClosed(false);
+        }
+      }
       const list = cuesRef.current;
       const s = live.current.settings;
 
@@ -545,6 +565,63 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       });
   };
 
+  // ---------- next episode, intro and credits ----------
+  useEffect(() => {
+    getCurrentWindow().isFullscreen().then(setFullscreen);
+  }, []);
+
+  // Find what comes after this video and get it ready in the background.
+  useEffect(() => {
+    if (phase !== "playing") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        let next: MediaReq | null = null;
+        if (media.plexId && settings.plex) next = await plex.next(settings.plex, settings, media.plexId);
+        else if (media.group?.startsWith("folder-")) {
+          const files = (await api.scanFolder(media.group.slice(7))).filter((f) => f.folder === "");
+          const i = files.findIndex((f) => f.key === media.key);
+          if (i >= 0 && files[i + 1]) next = { ...(await api.probeFile(files[i + 1].path)), group: media.group };
+        }
+        if (cancelled || !next) return;
+        setNextMedia(next);
+        const done = await api.prepared(next.key);
+        if (done && done.lang === lang) {
+          setNextReady(true);
+          return;
+        }
+        if (!settings.prepareNext) return;
+        await api.prepare(next, {
+          target_lang: lang,
+          native_lang: settings.nativeLang,
+          target_sub: "auto",
+          native_sub: "auto",
+          align: settings.align && canListen,
+        });
+        if (!cancelled) setNextReady(true);
+      } catch {
+        /* not fatal: the next episode will ask to be prepared when it is opened */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase, media.key]);
+
+  const skipIntro = () => {
+    const intro = (media.markers || []).find((m) => m.type === "intro" && now.current >= m.start && now.current < m.end);
+    if (intro) playFrom(intro.end);
+  };
+  const goNext = async () => {
+    if (!nextMedia) return;
+    // Count this one as finished so it does not resume near the end next time.
+    await api.progressSet(media.key, media.title, live.current.duration, live.current.duration).catch(() => {});
+    recorder.current?.stop();
+    await api.mpv("set_property", "video-margin-ratio-right", 0).catch(() => {});
+    play(nextMedia);
+  };
+
+
   // ---------- subtitle mode and dictation ----------
   const cycleSubMode = () => save({ subMode: SUB_MODES[(SUB_MODES.indexOf(settings.subMode) + 1) % SUB_MODES.length] });
   const toggleDictation = () => {
@@ -705,6 +782,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       },
       r: startShadow,
       x: toggleDictation,
+      i: () => offer === "intro" && skipIntro(),
+      n: () => nextMedia && goNext(),
+      Enter: () => (offer === "intro" ? skipIntro() : offer === "next" ? goNext() : undefined),
       m: cycleSubMode,
       g: () => save({ tenseColors: !settings.tenseColors }),
       "-": () => changeVolume(volume - 5),
@@ -1143,6 +1223,31 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
             <div className="row">
               <span className="muted small-text">Shift-click another word to select a phrase</span>
             </div>
+          </div>
+        )}
+
+        {offer && !offerClosed && !elsewhere && (
+          <div className="offer" onClick={(e) => e.stopPropagation()}>
+            {offer === "intro" ? (
+              <button className="primary" onClick={skipIntro}>
+                Skip intro <kbd>I</kbd>
+              </button>
+            ) : (
+              nextMedia && (
+                <>
+                  <div className="offer-text">
+                    <span className="muted small-text">Next episode{nextReady ? " · ready to study" : ""}</span>
+                    <strong>{nextMedia.title}</strong>
+                  </div>
+                  <button className="primary" onClick={goNext}>
+                    Play next <kbd>N</kbd>
+                  </button>
+                </>
+              )
+            )}
+            <button className="icon-btn small" onClick={() => setOfferClosed(true)} title="Dismiss">
+              <Icon name="close" size={16} />
+            </button>
           </div>
         )}
 

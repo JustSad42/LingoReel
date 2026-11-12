@@ -20,12 +20,16 @@ function DifficultyBadge({ s }: { s?: MediaStats }) {
   );
 }
 
-export default function Library() {
+/** Listings already loaded this session, for instant switching between libraries. */
+const memory = new Map<string, unknown>();
+
+export default function Library({ active }: { active: boolean }) {
   const { settings, save, toast, play } = useApp();
   const p = settings.plex;
   const [sections, setSections] = useState<Item[]>([]);
   const [source, setSource] = useState<Source | null>((settings.lastSource as Source) ?? null);
   const [managing, setManaging] = useState(false);
+  const [choices, setChoices] = useState<PlexConn[]>([]);
   const request = useRef(0);
   const hidden = settings.hiddenLibraries;
 
@@ -33,14 +37,19 @@ export default function Library() {
   const cached = async <T,>(key: string, fetcher: () => Promise<T>, apply: (v: T) => void) => {
     const id = ++request.current;
     let had = false;
-    try {
-      const raw = await api.cacheGet(key);
-      if (raw && id === request.current) {
-        apply(JSON.parse(raw));
-        had = true;
+    if (memory.has(key)) {
+      apply(memory.get(key) as T);
+      had = true;
+    } else {
+      try {
+        const raw = await api.cacheGet(key);
+        if (raw && id === request.current) {
+          apply(JSON.parse(raw));
+          had = true;
+        }
+      } catch {
+        /* no cache yet */
       }
-    } catch {
-      /* no cache yet */
     }
     if (!had) setLoading(true);
     try {
@@ -49,6 +58,7 @@ export default function Library() {
         apply(fresh);
         setError("");
       }
+      memory.set(key, fresh);
       api.cacheSet(key, JSON.stringify(fresh));
     } catch (e) {
       if (!had && id === request.current) setError(String(e));
@@ -77,9 +87,12 @@ export default function Library() {
   const [batch, setBatch] = useState<{ key: string; label: string; pct: number } | null>(null);
   const cancelBatch = useRef(false);
 
+  // Coming back from the player or another screen: pick up new watch progress and difficulty scores.
   useEffect(() => {
+    if (!active) return;
     api.progressAll().then((rows) => setProgress(new Map(rows.map(([k, pos, dur]) => [k, [pos, dur]]))));
-  }, []);
+    refreshSummaries();
+  }, [active]);
 
   useEffect(() => {
     if (!p) {
@@ -114,17 +127,17 @@ export default function Library() {
     setShow(null);
     setQuery("");
     if (source.kind === "plex" && p) {
-      setItems([]);
+      if (!memory.has(`plex:${p.url}:section:${source.key}`)) setItems([]);
       cached(`plex:${p.url}:section:${source.key}`, () => plex.get(p, `/library/sections/${source.key}/all`).then((mc) => slim(mc.Metadata)), setItems);
     } else if (source.kind === "folder") {
-      setFiles([]);
+      if (!memory.has(`folder:${source.path}`)) setFiles([]);
       cached(`folder:${source.path}`, () => api.scanFolder(source.path), setFiles);
     }
   }, [source]);
 
   useEffect(() => {
     if (!show || !p) return;
-    setEpisodes([]);
+    if (!memory.has(`plex:${p.url}:show:${show.ratingKey}`)) setEpisodes([]);
     cached(`plex:${p.url}:show:${show.ratingKey}`, () => plex.get(p, `/library/metadata/${show.ratingKey}/allLeaves`).then((mc) => slim(mc.Metadata)), setEpisodes);
   }, [show]);
 
@@ -164,8 +177,14 @@ export default function Library() {
       if (!token) throw new Error("Sign-in was not completed in time.");
       const servers = await plex.servers(settings, token);
       if (servers.length === 0) throw new Error("Signed in, but no Plex server could be reached from this PC.");
-      save({ plex: servers[0] });
-      toast(`Connected to ${servers[0].name}`);
+      if (servers.length > 1) {
+        // Own server plus servers shared by friends: let the person pick.
+        setChoices(servers);
+        toast("You have access to more than one Plex server. Choose which one to use.");
+      } else {
+        save({ plex: servers[0] });
+        toast(`Connected to ${servers[0].name}`);
+      }
     } catch (e) {
       toast(String(e));
     }
@@ -298,9 +317,30 @@ export default function Library() {
             </div>
           </>
         ) : (
-          <button className="primary small" disabled={linking} onClick={connectPlex}>
-            {linking ? "Waiting for sign-in in your browser…" : "Connect Plex"}
-          </button>
+          choices.length > 0 ? (
+            <>
+              <div className="muted small-text side-note">Choose a server</div>
+              {choices.map((c) => (
+                <button
+                  key={c.url}
+                  className="side-item"
+                  onClick={() => {
+                    save({ plex: c, lastSource: null });
+                    setSource(null);
+                    setChoices([]);
+                    toast(`Connected to ${c.name}`);
+                  }}
+                >
+                  <Icon name="server" size={17} />
+                  <span>{c.name}</span>
+                </button>
+              ))}
+            </>
+          ) : (
+            <button className="primary small" disabled={linking} onClick={connectPlex}>
+              {linking ? "Waiting for sign-in in your browser…" : "Connect Plex"}
+            </button>
+          )
         )}
         <h3>Folders</h3>
         {settings.folders.map((f) => (
@@ -338,7 +378,9 @@ export default function Library() {
 
         {source && !show && (
           <div className="row head">
-            <h1>{source.kind === "plex" ? source.title : source.path}</h1>
+            <h1 title={source.kind === "folder" ? source.path : undefined}>
+              {source.kind === "plex" ? source.title : source.path.split(/[\\/]/).filter(Boolean).pop()}
+            </h1>
             <div className="spacer" />
             {source.kind === "plex" && (
               <label className="search">

@@ -36,6 +36,7 @@ fn app_info(app: tauri::AppHandle, state: tauri::State<AppState>) -> Value {
         "version": app.package_info().version.to_string(),
         "dataDir": state.dir.to_string_lossy(),
         "nvidia": components::has_nvidia(),
+        "gpu": format!("{:?}", components::gpu()),
     })
 }
 

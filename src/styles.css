@@ -126,7 +126,10 @@ label.check input { margin-top: 1px; }
   background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--accent-text); font-size: 11px; font-weight: 700;
   display: grid; place-items: center;
 }
-.main { position: relative; z-index: 1; flex: 1; min-width: 0; overflow: auto; animation: rise 0.32s var(--ease); }
+.main { position: relative; z-index: 1; flex: 1; min-width: 0; overflow: hidden; }
+.view { height: 100%; overflow: auto; }
+.view[hidden] { display: none; }
+.view.enter { animation: rise 0.32s var(--ease); }
 .page { padding: 34px 40px 60px; max-width: 1080px; margin: 0 auto; }
 .page.narrow { max-width: 780px; }
 .page > h1 + .muted { margin-top: 0; }
@@ -418,19 +421,6 @@ html.player-active .toast { bottom: auto; top: 26px; }
 .orb.o1 { width: 52vw; height: 52vw; left: -14vw; top: -22vw; background: radial-gradient(circle, rgba(124, 92, 255, 0.62), transparent 68%); animation: float-a 28s ease-in-out infinite alternate; }
 .orb.o2 { width: 46vw; height: 46vw; right: -12vw; bottom: -20vw; background: radial-gradient(circle, rgba(255, 138, 76, 0.46), transparent 68%); animation: float-b 34s ease-in-out infinite alternate; }
 .orb.o3 { width: 36vw; height: 36vw; left: 38vw; top: 30vh; background: radial-gradient(circle, rgba(46, 196, 182, 0.28), transparent 68%); animation: float-c 40s ease-in-out infinite alternate; }
-/* A slow projector beam crossing the room. */
-.beam {
-  position: absolute; top: -30%; left: 0; width: 34%; height: 160%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.045) 45%, rgba(255, 255, 255, 0.07) 50%, rgba(255, 255, 255, 0.045) 55%, transparent);
-  animation: sweep 22s linear infinite; will-change: transform;
-}
-.drift span {
-  position: absolute; font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 400; white-space: nowrap;
-  color: transparent; -webkit-text-stroke: 1px rgba(255, 255, 255, 0.1); letter-spacing: 0.01em;
-  animation: drift linear infinite; will-change: transform, opacity;
-}
-.drift span:nth-child(3n) { -webkit-text-stroke-color: rgba(255, 176, 74, 0.11); }
-.drift span:nth-child(4n) { -webkit-text-stroke: 0; color: rgba(255, 255, 255, 0.035); }
 .grain {
   position: absolute; inset: 0; opacity: 0.16; mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
@@ -442,7 +432,7 @@ html.player-active .toast { bottom: auto; top: 26px; }
 .card, .stat { background: rgba(22, 22, 34, 0.62); }
 .prep-screen { position: relative; overflow: hidden; }
 .prep-screen .prep { position: relative; z-index: 1; }
-@media (prefers-reduced-motion: reduce) { .orb, .beam, .drift span { animation: none; } .drift span { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .orb, .wave i, .caption, .caption b { animation: none; } }
 
 /* ---------- subtitle modes ---------- */
 .marks .w.new { text-decoration: underline; text-decoration-color: var(--new); }
@@ -510,3 +500,52 @@ ruby { ruby-position: over; }
 rt { font-size: 0.42em; font-weight: 500; color: #d9d6ea; letter-spacing: 0.02em; text-shadow: 0 1px 3px #000; user-select: none; }
 .w.now rt { color: var(--accent); }
 .mode-focus .w.known rt { opacity: 0.9; }
+
+/* ---------- backdrop: a soundstage of sound waves and floating caption lines ---------- */
+@keyframes wave { 0%, 100% { transform: scaleY(0.18); } 50% { transform: scaleY(1); } }
+@keyframes rise-by { from { transform: translate3d(0, 110vh, 0); } to { transform: translate3d(0, -30vh, 0); } }
+@keyframes karaoke { 0%, 12% { width: 0; } 70%, 100% { width: 100%; } }
+@keyframes horizon { from { background-position: 0 0; } to { background-position: 0 64px; } }
+.backdrop { background: radial-gradient(120% 90% at 50% 110%, #1a1030 0%, #0c0b16 48%, #07070c 100%); }
+/* Perspective floor, like light falling across a cinema aisle. */
+.floor {
+  position: absolute; left: -50%; right: -50%; bottom: -6%; height: 58%; transform: perspective(520px) rotateX(64deg); transform-origin: 50% 100%;
+  background-image:
+    linear-gradient(rgba(143, 123, 255, 0.16) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(143, 123, 255, 0.12) 1px, transparent 1px);
+  background-size: 64px 64px; animation: horizon 7s linear infinite;
+  -webkit-mask-image: linear-gradient(transparent 0%, #000 55%, transparent 100%); mask-image: linear-gradient(transparent 0%, #000 55%, transparent 100%);
+}
+/* Speech as a waveform along the horizon. */
+.wave {
+  position: absolute; left: 6%; right: 6%; top: 64%; height: 24vh; display: flex; align-items: center; gap: 0.45%;
+  transform: translateY(-50%); opacity: 0.4; filter: blur(0.4px);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent); mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
+}
+.wave i {
+  flex: 1; height: 100%; border-radius: 99px; transform-origin: 50% 50%; will-change: transform;
+  background: linear-gradient(180deg, rgba(255, 176, 74, 0), rgba(255, 150, 90, 0.5) 30%, rgba(143, 123, 255, 0.55) 70%, rgba(143, 123, 255, 0));
+  animation: wave ease-in-out infinite;
+}
+/* Caption lines drifting up, each filling in the way a subtitle is read. */
+.caption {
+  position: absolute; top: 0; height: 12px; border-radius: 8px; background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.06); overflow: hidden; animation: rise-by linear infinite; will-change: transform;
+}
+.caption b { display: block; height: 100%; border-radius: 8px; animation: karaoke ease-in-out infinite alternate; background: linear-gradient(90deg, rgba(255, 176, 74, 0.5), rgba(255, 125, 92, 0.18)); }
+.caption.alt b { background: linear-gradient(90deg, rgba(143, 123, 255, 0.5), rgba(46, 196, 182, 0.2)); }
+.orb.o1 { opacity: 0.75; } .orb.o2 { opacity: 0.8; } .orb.o3 { display: none; }
+
+/* ---------- skip intro / next episode ---------- */
+.offer {
+  position: absolute; right: 24px; bottom: 154px; z-index: 4; display: flex; align-items: center; gap: 14px; padding: 12px 12px 12px 18px;
+  background: rgba(22, 22, 32, 0.95); border: 1px solid var(--line-2); border-radius: 16px; box-shadow: var(--shadow); animation: rise 0.25s var(--ease);
+  transition: bottom 0.3s var(--ease);
+}
+.player:not(.show-controls) .offer { bottom: 34px; }
+.offer-text { display: flex; flex-direction: column; gap: 2px; max-width: 340px; }
+.offer-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+kbd {
+  font: inherit; font-size: 11.5px; font-weight: 700; padding: 1px 7px; border-radius: 6px; background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(0, 0, 0, 0.25); margin-left: 4px;
+}

@@ -38,6 +38,60 @@ pub fn has_nvidia() -> bool {
     on_path("nvidia-smi.exe").is_some() || Path::new(r"C:\Windows\System32\nvidia-smi.exe").exists()
 }
 
+/// Which speech-recognition build suits this PC.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Gpu {
+    /// NVIDIA: CUDA build.
+    Nvidia,
+    /// AMD Radeon or Intel Arc: Vulkan build.
+    Vulkan,
+    /// No suitable graphics card: CPU build with a smaller model.
+    None,
+}
+
+pub fn gpu() -> Gpu {
+    static DETECTED: std::sync::OnceLock<Gpu> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        match std::env::var("LINGOREEL_GPU").as_deref() {
+            Ok("nvidia") => return Gpu::Nvidia,
+            Ok("vulkan") => return Gpu::Vulkan,
+            Ok("none") => return Gpu::None,
+            _ => {}
+        }
+        if has_nvidia() {
+            Gpu::Nvidia
+        } else if has_vulkan_card() {
+            Gpu::Vulkan
+        } else {
+            Gpu::None
+        }
+    })
+}
+
+/// True for a dedicated AMD or Intel graphics card with a Vulkan driver installed.
+fn has_vulkan_card() -> bool {
+    if !Path::new(r"C:\Windows\System32\vulkan-1.dll").exists() {
+        return false;
+    }
+    let mut c = std::process::Command::new("reg");
+    c.args([
+        "query",
+        r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}",
+        "/s",
+        "/v",
+        "DriverDesc",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let Ok(out) = c.output() else { return false };
+    let names = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    // "Radeon RX 9070 XT", "Radeon RX 7800", "Intel(R) Arc(TM) A770". Integrated chips are too slow.
+    names.contains("radeon rx") || names.contains("radeon pro") || names.contains("arc(tm)") || names.contains("intel arc")
+}
+
 /// Languages with a dictionary: (code, name, download size in MB).
 pub const LANGUAGES: &[(&str, &str, u32)] = &[
     ("fr", "French", 22),
@@ -55,21 +109,30 @@ struct DictSpec {
 }
 
 fn specs() -> Vec<Spec> {
-    let gpu = has_nvidia();
+    let card = gpu();
+    let gpu = card != Gpu::None;
     vec![
         Spec { id: "mpv", name: "Video player engine (mpv)", about: "Plays every video format, including the ones on your server.", size_mb: 35, required: true },
         Spec { id: "ffmpeg", name: "Media tools (FFmpeg)", about: "Reads subtitle and audio tracks out of your video files.", size_mb: 200, required: true },
         Spec {
             id: "whisper",
             name: "Speech recognition engine (Whisper)",
-            about: if gpu { "Listens to the audio to time every word. NVIDIA GPU build." } else { "Listens to the audio to time every word. CPU build (slow without an NVIDIA GPU)." },
-            size_mb: if gpu { 670 } else { 8 },
+            about: match card {
+                Gpu::Nvidia => "Listens to the audio to time every word. NVIDIA graphics card build.",
+                Gpu::Vulkan => "Listens to the audio to time every word. Build for AMD and Intel graphics cards.",
+                Gpu::None => "Listens to the audio to time every word. Processor-only build (slow without a graphics card).",
+            },
+            size_mb: match card {
+                Gpu::Nvidia => 670,
+                Gpu::Vulkan => 25,
+                Gpu::None => 8,
+            },
             required: false,
         },
         Spec {
             id: "whisper-model",
             name: "Speech recognition model",
-            about: if gpu { "large-v3-turbo: accurate, about 1 to 2 minutes per episode on a recent NVIDIA GPU." } else { "small: lighter model suited to CPU-only machines." },
+            about: if gpu { "large-v3-turbo: accurate, a few minutes per episode on a recent graphics card." } else { "small: lighter model suited to PCs without a graphics card." },
             size_mb: if gpu { 1625 } else { 490 },
             required: false,
         },
@@ -91,12 +154,12 @@ pub fn dir(state: &AppState, id: &str) -> PathBuf {
 }
 
 pub fn whisper_model_name() -> &'static str {
-    if has_nvidia() { "ggml-large-v3-turbo.bin" } else { "ggml-small.bin" }
+    if gpu() != Gpu::None { "ggml-large-v3-turbo.bin" } else { "ggml-small.bin" }
 }
 
 /// Alignment-head preset matching the installed Whisper model.
 pub fn whisper_dtw_preset() -> &'static str {
-    if has_nvidia() { "large.v3.turbo" } else { "small" }
+    if gpu() != Gpu::None { "large.v3.turbo" } else { "small" }
 }
 
 const LLM_MODEL_FILE: &str = "google_gemma-3-4b-it-Q4_K_M.gguf";
@@ -175,7 +238,6 @@ pub fn components_status(state: State<AppState>) -> Res<Vec<Component>> {
 /// Download URL(s) for a component. mpv builds are published daily and old ones are
 /// removed, so that one is resolved through the GitHub API at install time.
 async fn urls(state: &AppState, id: &str) -> anyhow::Result<Vec<String>> {
-    let gpu = has_nvidia();
     Ok(match id {
         "mpv" => {
             let rel: serde_json::Value = state
@@ -200,10 +262,12 @@ async fn urls(state: &AppState, id: &str) -> anyhow::Result<Vec<String>> {
             vec![url]
         }
         "ffmpeg" => vec!["https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".into()],
-        "whisper" => vec![format!(
-            "{WHISPER_RELEASE}/{}",
-            if gpu { "whisper-cublas-12.4.0-bin-x64.zip" } else { "whisper-bin-x64.zip" }
-        )],
+        "whisper" => vec![match gpu() {
+            Gpu::Nvidia => format!("{WHISPER_RELEASE}/whisper-cublas-12.4.0-bin-x64.zip"),
+            // Upstream publishes no Vulkan build for Windows; ours is built by a workflow in this repository.
+            Gpu::Vulkan => format!("{DATA_RELEASE}/whisper-vulkan-bin-x64.zip"),
+            Gpu::None => format!("{WHISPER_RELEASE}/whisper-bin-x64.zip"),
+        }],
         "whisper-model" => vec![format!(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
             whisper_model_name()

@@ -30,6 +30,11 @@ model. After that the app works offline and updates itself.
 - **Tense colours** – verbs are tinted by tense (passé composé, imparfait, futur, conditionnel, subjonctif and more); can be switched off.
 - **Easy lines** – finds every line with exactly one word you do not know and adds them to review in one click.
 - **Hear it elsewhere** – plays other scenes from your prepared videos where the same word is spoken.
+- **Next episode** – the following episode is prepared in the background while you watch, then offered when the credits start.
+- **Skip intro and credits** – uses the intro and credits markers from your Plex server when it has them.
+
+Graphics cards: NVIDIA, AMD Radeon RX and Intel Arc cards all run speech recognition on the
+card. PCs without one use a smaller model on the processor.
 
 Languages: French, Spanish (Castilian preferred when a video has both Spain and Latin America
 tracks), German, Italian, Portuguese and Japanese. Japanese shows romaji or hiragana above each
@@ -57,6 +62,8 @@ speed, volume and last library.
 | X | Dictation |
 | M | Subtitle mode |
 | G | Tense colours |
+| I | Skip the intro |
+| N | Next episode |
 | [ and ] | Slower / faster |
 | F | Fullscreen |
 | Esc | Close / back |
@@ -71,7 +78,7 @@ npm run dev:app        # run with a separate data folder, safe next to an instal
 npm run tauri build    # installer in src-tauri/target/release/bundle/nsis
 ```
 
-To publish a new version: `.\release.ps1 0.2.0`. GitHub Actions builds and signs the
+To publish a new version: `.\release.ps1 0.5.0`. GitHub Actions builds and signs the
 installer; installed copies update on their next launch.
 
 ## Credits

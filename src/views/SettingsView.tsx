@@ -29,7 +29,7 @@ export default function SettingsView() {
     setChecking(false);
   };
 
-  const toggle = (key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors", label: string, hint: string) => (
+  const toggle = (key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors" | "prepareNext", label: string, hint: string) => (
     <label className="check">
       <input type="checkbox" checked={settings[key]} onChange={(e) => save({ [key]: e.target.checked })} />
       <span>
@@ -85,6 +85,7 @@ export default function SettingsView() {
           Subtitle size: {settings.subSize}px
           <input type="range" min={20} max={60} step={1} value={settings.subSize} onChange={(e) => save({ subSize: +e.target.value })} />
         </label>
+        {toggle("prepareNext", "Prepare the next episode while I watch", "so it is ready to study the moment the current one ends")}
         {toggle("align", "Time every word from the audio by default", "applies when preparing a video; needs speech recognition from Setup")}
       </section>
 
