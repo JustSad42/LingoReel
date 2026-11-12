@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Tok = { t: string; w: boolean; lemma?: string; s: number; e: number };
+export type Tok = { t: string; w: boolean; lemma?: string; g?: string; s: number; e: number };
 export type Cue = { start: number; end: number; text: string; tokens: Tok[]; en: string };
 export type Prepared = {
   key: string;
@@ -92,6 +92,27 @@ export type Card = {
   stability: number;
   preview: [number, number, number, number];
 };
+export type MinedLine = {
+  cue: number;
+  start: number;
+  end: number;
+  text: string;
+  en: string;
+  lemma: string;
+  word: string;
+  gloss: string;
+  rank: number | null;
+};
+export type Occurrence = {
+  key: string;
+  title: string;
+  url: string;
+  start: number;
+  end: number;
+  text: string;
+  en: string;
+  word: string;
+};
 export type FileEntry = { path: string; name: string; folder: string; key: string };
 export type PlexConn = { name: string; url: string; token: string };
 
@@ -111,6 +132,12 @@ export type Settings = {
   slowSpeed: number;
   align: boolean;
   colorWords: boolean;
+  /** "full" | "focus" (known words dimmed) | "listen" (line appears after it is spoken) */
+  subMode: string;
+  /** Tint verbs by tense. */
+  tenseColors: boolean;
+  /** "auto" or a zoom factor such as 1.25 */
+  uiScale: string;
   subSize: number;
   llmUrl: string;
   llmModel: string;
@@ -132,6 +159,9 @@ export const DEFAULTS: Settings = {
   slowSpeed: 0.8,
   align: true,
   colorWords: true,
+  subMode: "full",
+  tenseColors: true,
+  uiScale: "auto",
   subSize: 34,
   llmUrl: "",
   llmModel: "",
@@ -164,6 +194,9 @@ export const api = {
   preparedDelete: (key: string) => invoke("prepared_delete", { key }),
   stats: (key: string) => invoke<MediaStats | null>("media_stats", { key }),
   summaries: (keys: string[]) => invoke<Record<string, MediaStats>>("media_summaries", { keys }),
+  mine: (key: string) => invoke<MinedLine[]>("media_mine", { key }),
+  occurrences: (lang: string, lemma: string, skipKey: string, skipStart: number) =>
+    invoke<Occurrence[]>("word_occurrences", { lang, lemma, skipKey, skipStart }),
   scanFolder: (path: string) => invoke<FileEntry[]>("scan_folder", { path }),
   probeFile: (path: string) => invoke<MediaReq>("probe_file", { path }),
   mapPath: (file: string, from: string, to: string) => invoke<string | null>("map_path", { file, from, to }),
@@ -192,6 +225,65 @@ export const LANGS: Record<string, string> = {
   pt: "Portuguese",
   ja: "Japanese",
 };
+
+/** Verb tenses shown by colour. Unlisted codes (present, infinitive, participles) stay uncoloured. */
+export const TENSES: Record<string, string> = {
+  pc: "Passé composé",
+  imp: "Imparfait",
+  pqp: "Plus-que-parfait",
+  ps: "Passé simple",
+  fut: "Futur",
+  fp: "Futur proche",
+  cond: "Conditionnel",
+  subj: "Subjonctif",
+  imper: "Impératif",
+};
+export const TENSE_NAMES: Record<string, string> = {
+  ...TENSES,
+  pres: "Présent",
+  inf: "Infinitif",
+  pp: "Participe passé",
+  ppr: "Participe présent",
+};
+
+export type Mark = { w: string; state: "hit" | "close" | "miss" };
+
+const plain = (x: string) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const parts = (x: string) => x.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+
+/** Dictation: compare what was typed with the words of the line. */
+export function gradeDictation(tokens: Tok[], typed: string): { marks: Mark[]; hits: number } {
+  const words = tokens.filter((k) => k.w);
+  const exp: { tok: number; p: string }[] = [];
+  words.forEach((k, i) => parts(k.t).forEach((p) => exp.push({ tok: i, p })));
+  const got = parts(typed);
+  const n = exp.length;
+  const m = got.length;
+  const same = (a: string, b: string) => (a === b ? 2 : plain(a) === plain(b) ? 1 : 0);
+  // Longest common subsequence, so a missed word does not shift everything after it.
+  const dp = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = same(exp[i].p, got[j]) ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const quality = new Array<number>(n).fill(0);
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    const q = same(exp[i].p, got[j]);
+    if (q && dp[i][j] === dp[i + 1][j + 1] + 1) {
+      quality[i] = q;
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  const marks: Mark[] = words.map((k, wi) => {
+    const qs = exp.map((e, idx) => (e.tok === wi ? quality[idx] : -1)).filter((q) => q >= 0);
+    const state = qs.length && qs.every((q) => q === 2) ? "hit" : qs.length && qs.every((q) => q >= 1) ? "close" : "miss";
+    return { w: k.t, state };
+  });
+  return { marks, hits: marks.filter((x) => x.state !== "miss").length };
+}
 
 export function fmtTime(s: number): string {
   if (!isFinite(s) || s < 0) s = 0;

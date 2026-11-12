@@ -9,6 +9,11 @@ import Review from "./views/Review";
 import Words from "./views/Words";
 import SettingsView from "./views/SettingsView";
 import Icon from "./Icon";
+import Backdrop from "./Backdrop";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+
+/** Zoom currently applied to the webview. */
+let zoom = 1;
 
 type Ctx = {
   settings: Settings;
@@ -96,6 +101,34 @@ export default function App() {
     document.documentElement.classList.toggle("player-active", !!playing);
   }, [playing]);
 
+  // Scale the whole interface with the window, so it is not tiny on a large or 4K screen.
+  const uiScale = settings?.uiScale;
+  useEffect(() => {
+    if (!uiScale) return;
+    let timer = 0;
+    const apply = () => {
+      // Window size in unzoomed units stays the same whatever zoom is applied.
+      const w = window.innerWidth * zoom;
+      const h = window.innerHeight * zoom;
+      const auto = Math.min(w / 1440, h / 840);
+      const want = uiScale === "auto" ? Math.round(Math.min(2.4, Math.max(0.8, auto)) * 20) / 20 : Number(uiScale) || 1;
+      if (Math.abs(want - zoom) > 0.01) {
+        zoom = want;
+        getCurrentWebview().setZoom(want).catch(() => {});
+      }
+    };
+    const onResize = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(apply, 120);
+    };
+    apply();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.clearTimeout(timer);
+    };
+  }, [uiScale]);
+
   if (!ctx) return null;
 
   const installUpdate = async () => {
@@ -124,7 +157,7 @@ export default function App() {
         <Player media={playing} onExit={() => setPlaying(null)} />
       ) : (
         <div className="shell">
-          <div className="glow" />
+          <Backdrop />
           <nav className="rail">
             <img className="logo" src="/logo.png" alt="LingoReel" />
             {tabs.map(([id, label, icon]) => (

@@ -42,6 +42,32 @@ pub struct Dict {
     lemma_cache: HashMap<String, Option<String>>,
 }
 
+/// Map Wiktionary's form description to a tense code; None for non-verb forms.
+fn classify_tense(tags: &str) -> Option<&'static str> {
+    let has = |k: &str| tags.contains(k);
+    Some(if has("participle") {
+        if has("past") { "pp" } else { "ppr" }
+    } else if has("gerund") {
+        "ppr"
+    } else if has("subjunctive") {
+        "subj"
+    } else if has("imperative") {
+        "imper"
+    } else if has("conditional") {
+        "cond"
+    } else if has("future") {
+        "fut"
+    } else if has("historic") {
+        "ps"
+    } else if has("imperfect") {
+        "imp"
+    } else if has("present") && has("indicative") {
+        "pres"
+    } else {
+        return None;
+    })
+}
+
 const FR_ELISIONS: &[(&str, &str)] = &[
     ("l'", "le"), ("d'", "de"), ("j'", "je"), ("n'", "ne"), ("m'", "me"), ("t'", "te"),
     ("s'", "se"), ("c'", "ce"), ("qu'", "que"), ("jusqu'", "jusque"), ("lorsqu'", "lorsque"),
@@ -77,6 +103,32 @@ impl Dict {
         st.query_map([norm], |r| Ok((r.get(0)?, r.get(1)?)))
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
+    }
+
+    fn is_verb(&self, norm: &str) -> bool {
+        self.db
+            .query_row("SELECT 1 FROM entry WHERE norm=?1 AND pos='verb' LIMIT 1", [norm], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// Tenses the surface form can be, as a form of `lemma` ("pres", "imp", "pp", ...).
+    pub fn tenses(&self, surface: &str, lemma: &str) -> Vec<&'static str> {
+        let n = norm(surface);
+        let mut out: Vec<&'static str> = vec![];
+        for (l, tags) in self.forms(&n) {
+            if norm(&l) != lemma {
+                continue;
+            }
+            if let Some(c) = classify_tense(&tags) {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+        if n == lemma && self.is_verb(&n) {
+            out.push("inf");
+        }
+        out
     }
 
     fn elided(&self, norm: &str) -> Option<&'static str> {
@@ -246,7 +298,7 @@ impl Dict {
 pub fn with_dict<T>(state: &AppState, lang: &str, f: impl FnOnce(&mut Dict) -> T) -> anyhow::Result<T> {
     let mut dicts = state.dicts.lock().unwrap();
     if !dicts.contains_key(lang) {
-        let path = state.dir.join("components").join("dict").join(format!("dict-{lang}.sqlite"));
+        let path = crate::components::dir(state, &format!("dict-{lang}")).join(format!("dict-{lang}.sqlite"));
         if !path.exists() {
             anyhow::bail!("The {lang} dictionary is not installed yet (see Setup).");
         }

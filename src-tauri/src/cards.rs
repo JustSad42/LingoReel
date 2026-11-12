@@ -92,6 +92,8 @@ fn card_of(r: &Row) -> rusqlite::Result<Card> {
 async fn make_clip(app: AppHandle, id: i64, c: NewCard) {
     let state = app.state::<AppState>();
     let Ok(ffmpeg) = components::require(&state, "ffmpeg") else { return };
+    // Adding many cards at once must not start dozens of FFmpeg processes.
+    let Ok(_slot) = state.clip_slots.acquire().await else { return };
     let dir = state.dir.join("clips");
     let _ = tokio::fs::create_dir_all(&dir).await;
     let (clip, image) = (dir.join(format!("{id}.mp4")), dir.join(format!("{id}.jpg")));

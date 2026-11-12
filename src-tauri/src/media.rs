@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 const TEXT_CODECS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "tx3g", "webvtt", "vtt", "text"];
 const VIDEO_EXT: &[&str] = &["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "wmv"];
-const PREPARED_VERSION: u32 = 1;
+const PREPARED_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SubTrack {
@@ -78,6 +78,9 @@ pub struct Prepared {
     pub version: u32,
     pub key: String,
     pub title: String,
+    /// Where the video was played from when it was prepared.
+    #[serde(default)]
+    pub url: String,
     pub lang: String,
     pub cues: Vec<Cue>,
     /// True when word timings come from the audio rather than being estimated.
@@ -400,6 +403,7 @@ async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Prepa
         version: PREPARED_VERSION,
         key: key.to_string(),
         title: req.title.clone(),
+        url: req.url.clone(),
         lang: lang.clone(),
         target_source: target_source.into(),
         native_source: if native_cues.is_empty() { "none".into() } else { "subtitles".into() },
@@ -555,6 +559,144 @@ pub fn media_summaries(state: State<AppState>, keys: Vec<String>) -> Res<HashMap
             }
             out.insert(key, compute_stats(&state, &p, &cache[&p.lang], false));
         }
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+pub struct MinedLine {
+    pub cue: usize,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    pub en: String,
+    pub lemma: String,
+    pub word: String,
+    pub gloss: String,
+    pub rank: Option<i64>,
+}
+
+/// Sentence mining: lines where exactly one word is not known yet. One line per word,
+/// most common words first, skipping words that already have a review card.
+#[tauri::command]
+pub fn media_mine(state: State<AppState>, key: String) -> Res<Vec<MinedLine>> {
+    let Some(p) = load_prepared(&state, &key) else { return Ok(vec![]) };
+    let status = statuses(&state, &p.lang)?;
+    let carded: std::collections::HashSet<String> = {
+        let db = state.db.lock().unwrap();
+        let mut st = db.prepare("SELECT DISTINCT lemma FROM cards WHERE lang=?1")?;
+        let rows = st.query_map([&p.lang], |r| r.get::<_, String>(0))?;
+        rows.flatten().collect()
+    };
+    let mut picked: HashMap<String, (usize, String)> = HashMap::new();
+    for (i, cue) in p.cues.iter().enumerate() {
+        let words: Vec<_> = cue.tokens.iter().filter(|t| t.w && t.lemma.is_some()).collect();
+        if words.len() < 3 {
+            continue;
+        }
+        let mut unknown: Vec<(&str, &str)> = vec![];
+        for t in &words {
+            let l = t.lemma.as_deref().unwrap();
+            if status.get(l).copied().unwrap_or(0) < 2 && !unknown.iter().any(|(x, _)| *x == l) {
+                unknown.push((l, t.t.as_str()));
+            }
+        }
+        if let [(lemma, word)] = unknown[..] {
+            if !carded.contains(lemma) && !picked.contains_key(lemma) {
+                picked.insert(lemma.to_string(), (i, word.to_string()));
+            }
+        }
+    }
+    let mut out: Vec<MinedLine> = vec![];
+    dict::with_dict(&state, &p.lang, |d| {
+        for (lemma, (i, word)) in picked {
+            let look = d.lookup(&lemma);
+            let cue = &p.cues[i];
+            out.push(MinedLine {
+                cue: i,
+                start: cue.start,
+                end: cue.end,
+                text: cue.text.clone(),
+                en: cue.en.clone(),
+                gloss: look.entries.first().map(|e| e.glosses.iter().take(3).cloned().collect::<Vec<_>>().join("; ")).unwrap_or_default(),
+                rank: look.rank,
+                lemma,
+                word,
+            });
+        }
+    })?;
+    out.sort_by_key(|m| (m.rank.unwrap_or(i64::MAX), m.cue));
+    out.truncate(150);
+    Ok(out)
+}
+
+#[derive(Serialize)]
+pub struct Occurrence {
+    pub key: String,
+    pub title: String,
+    pub url: String,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    pub en: String,
+    pub word: String,
+}
+
+/// Every prepared scene where a word is spoken, spread across as many videos as possible.
+#[tauri::command(async)]
+pub fn word_occurrences(state: State<AppState>, lang: String, lemma: String, skip_key: String, skip_start: f64) -> Res<Vec<Occurrence>> {
+    const PER_VIDEO: usize = 4;
+    const TOTAL: usize = 24;
+    let mut per_video: Vec<Vec<Occurrence>> = vec![];
+    let Ok(rd) = std::fs::read_dir(state.dir.join("media")) else { return Ok(vec![]) };
+    for e in rd.flatten() {
+        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+        // Cheap pre-filter before parsing a few hundred kilobytes of JSON.
+        if !text.contains(&format!("\"lemma\":\"{lemma}\"")) {
+            continue;
+        }
+        let Ok(p) = serde_json::from_str::<Prepared>(&text) else { continue };
+        if p.lang != lang || p.version != PREPARED_VERSION {
+            continue;
+        }
+        let mut hits = vec![];
+        for cue in &p.cues {
+            if p.key == skip_key && (cue.start - skip_start).abs() < 0.01 {
+                continue;
+            }
+            if let Some(t) = cue.tokens.iter().find(|t| t.lemma.as_deref() == Some(lemma.as_str())) {
+                hits.push(Occurrence {
+                    key: p.key.clone(),
+                    title: p.title.clone(),
+                    url: p.url.clone(),
+                    start: cue.start,
+                    end: cue.end,
+                    text: cue.text.clone(),
+                    en: cue.en.clone(),
+                    word: t.t.clone(),
+                });
+                if hits.len() >= PER_VIDEO {
+                    break;
+                }
+            }
+        }
+        if !hits.is_empty() {
+            per_video.push(hits);
+        }
+    }
+    // Round-robin so the list mixes videos instead of exhausting the first one.
+    let mut out = vec![];
+    let mut round = 0;
+    while out.len() < TOTAL && per_video.iter().any(|v| v.len() > round) {
+        for v in per_video.iter_mut() {
+            if v.len() > round && out.len() < TOTAL {
+                out.push(std::mem::replace(
+                    &mut v[round],
+                    Occurrence { key: String::new(), title: String::new(), url: String::new(), start: 0.0, end: 0.0, text: String::new(), en: String::new(), word: String::new() },
+                ));
+            }
+        }
+        round += 1;
     }
     Ok(out)
 }

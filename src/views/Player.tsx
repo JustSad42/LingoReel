@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Cue, Entry, fmtTime, freqLabel, LANGS, Lookup, MediaReq, MediaStats, Prepared, STATUS, SubTrack } from "../api";
+import {
+  api, Cue, Entry, fmtTime, freqLabel, gradeDictation, LANGS, Lookup, Mark, MediaReq, MediaStats, MinedLine, Occurrence, plex,
+  Prepared, STATUS, SubTrack, TENSE_NAMES, TENSES,
+} from "../api";
 import { useApp } from "../App";
 import Icon from "../Icon";
+import Backdrop from "../Backdrop";
 
 const PANEL_W = 420;
 const TEXT_CODECS = ["subrip", "srt", "ass", "ssa", "mov_text", "tx3g", "webvtt", "vtt", "text"];
@@ -21,6 +25,10 @@ type Popup = {
   explain?: string;
   explaining?: boolean;
 };
+type Dictation = { cue: number; input: string; marks?: Mark[] };
+type Elsewhere = { items: Occurrence[]; idx: number; back: number; lemma: string };
+const SUB_MODES = ["full", "focus", "listen"];
+const SUB_MODE_LABEL: Record<string, string> = { full: "all words", focus: "focus", listen: "after hearing" };
 type Shadow = {
   phase: "listen" | "record" | "scoring" | "result";
   cue: number;
@@ -85,7 +93,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const [cueIdx, setCueIdx] = useState(-1);
   const [audioTracks, setAudioTracks] = useState<any[]>([]);
   const [aid, setAid] = useState<number | null>(null);
-  const [panel, setPanel] = useState<"none" | "transcript" | "words">("none");
+  const [panel, setPanel] = useState<"none" | "transcript" | "words" | "mine">("none");
+  const [mined, setMined] = useState<MinedLine[] | null>(null);
+  const [dictOn, setDictOn] = useState(false);
+  const [dict, setDict] = useState<Dictation | null>(null);
+  const [dictScore, setDictScore] = useState({ hits: 0, total: 0 });
+  const [elsewhere, setElsewhere] = useState<Elsewhere | null>(null);
   const [popup, setPopup] = useState<Popup | null>(null);
   const [controls, setControls] = useState(true);
   const [reveal, setReveal] = useState(-1);
@@ -110,8 +123,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const popupPaused = useRef(false);
   const hideTimer = useRef<number>();
   const recorder = useRef<MediaRecorder | null>(null);
-  const live = useRef({ settings, words, baseSpeed, duration });
-  live.current = { settings, words, baseSpeed, duration };
+  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere });
+  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere };
+  const dictInput = useRef<HTMLInputElement>(null);
 
   const cues = prepared?.cues ?? [];
   cuesRef.current = cues;
@@ -123,10 +137,10 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       setPhase("playing");
       const saved = (await api.progressAll()).find(([k]) => k === media.key);
       const pos = saved && saved[2] > 0 && saved[1] / saved[2] < 0.97 ? Math.max(0, saved[1] - 3) : 0;
-      await api.mpv("set_property", "start", String(pos));
+      await api.mpv("set_property", "alang", `${lang},${{ fr: "fre,fra", ja: "jpn", es: "spa", de: "ger,deu", it: "ita" }[lang] || lang}`);
       await api.mpv("set_property", "pause", false);
       await api.mpv("set_property", "speed", 1);
-      await api.mpv("loadfile", media.url);
+      await api.mpv("loadfile", media.url, "replace", -1, `start=${pos.toFixed(2)}`);
     },
     [media],
   );
@@ -204,6 +218,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
             speedRef.current = ev.data;
           }
           break;
+        case "eof-reached":
+          if (ev.data === true && live.current.elsewhere) {
+            const at = live.current.elsewhere.idx;
+            window.setTimeout(() => live.current.elsewhere?.idx === at && stepElsewhere.current(1), 600);
+          }
+          break;
         case "track-list":
           setAudioTracks((ev.data || []).filter((t: any) => t.type === "audio"));
           break;
@@ -233,6 +253,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       const c = clock.current;
       let t = c.t;
       if (!pausedRef.current) t += ((performance.now() - c.stamp) / 1000) * speedRef.current;
+      if (live.current.elsewhere) {
+        // Another video's scene is playing; leave this video's subtitles and position alone.
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       now.current = t;
       const list = cuesRef.current;
       const s = live.current.settings;
@@ -246,8 +271,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
       let idx = cueAt(list, t);
       if (pausedRef.current && holdIdx.current >= 0) idx = holdIdx.current;
+      const dictating = live.current.dictOn;
       if (
-        s.autoPause &&
+        (s.autoPause || dictating) &&
         idx >= 0 &&
         !pausedRef.current &&
         !stopAt.current &&
@@ -258,6 +284,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         holdIdx.current = idx;
         pausedRef.current = true;
         api.mpv("set_property", "pause", true);
+        if (dictating) {
+          const at = idx;
+          // Keep what was typed if the line is merely being replayed.
+          setDict((d) => (d && d.cue === at && !d.marks ? d : { cue: at, input: "" }));
+        }
       }
       if (idx !== idxRef.current) {
         idxRef.current = idx;
@@ -271,6 +302,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       }
       const el = lineRef.current;
       if (el && idx >= 0) {
+        el.classList.toggle("heard", t >= list[idx].end - 0.35 || live.current.reveal === idx);
         for (const span of el.children as HTMLCollectionOf<HTMLElement>) {
           const ws = span.dataset.s;
           if (ws === undefined) continue;
@@ -292,7 +324,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
   // Save position regularly and on exit.
   const saveProgress = useCallback(() => {
-    if (now.current > 1) api.progressSet(media.key, media.title, now.current, live.current.duration);
+    if (now.current > 1 && !live.current.elsewhere) api.progressSet(media.key, media.title, now.current, live.current.duration);
   }, [media]);
   useEffect(() => {
     if (phase !== "playing") return;
@@ -312,7 +344,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
   useEffect(() => {
     if (panel === "words") api.stats(media.key).then(setStats);
+    if (panel === "mine") api.mine(media.key).then(setMined);
   }, [panel, media.key]);
+
+  useEffect(() => {
+    if (dict && !dict.marks) dictInput.current?.focus();
+  }, [dict?.cue, !!dict?.marks]);
 
   useEffect(() => {
     if (panel === "transcript") activeRow.current?.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -406,7 +443,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const popupText = popup ? cues[popup.cue].tokens.slice(popup.from, popup.to + 1).map((k) => k.t).join("") : "";
   const popupLemma = popup && popup.from === popup.to ? popup.lookup?.lemma ?? cues[popup.cue].tokens[popup.from].lemma ?? null : null;
 
-  const saveCard = (ci: number, word: string, lemma: string, definition: string) => {
+  const saveCard = (ci: number, word: string, lemma: string, definition: string, quiet = false) => {
     const cue = cuesRef.current[ci];
     if (!cue) return;
     api
@@ -425,7 +462,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         audio_index: prepared?.audio_index ?? null,
       })
       .then(() => {
-        toast(word ? `Saved “${word}” for review` : "Saved this line for review");
+        if (!quiet) toast(word ? `Saved “${word}” for review` : "Saved this line for review");
         if (lemma && (words.get(lemma) ?? 0) === 0) setWords([lemma], 1);
       })
       .catch((err) => toast(String(err)));
@@ -455,6 +492,85 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
           return n;
         });
       });
+  };
+
+  // ---------- subtitle mode and dictation ----------
+  const cycleSubMode = () => save({ subMode: SUB_MODES[(SUB_MODES.indexOf(settings.subMode) + 1) % SUB_MODES.length] });
+  const toggleDictation = () => {
+    if (dictOn) setDict(null);
+    else {
+      setDictScore({ hits: 0, total: 0 });
+      if (popup) closePopup();
+    }
+    setDictOn(!dictOn);
+  };
+  const checkDictation = () => {
+    if (!dict) return;
+    const { marks, hits } = gradeDictation(cuesRef.current[dict.cue].tokens, dict.input);
+    setDict({ ...dict, marks });
+    setDictScore((sc) => ({ hits: sc.hits + hits, total: sc.total + marks.length }));
+  };
+  const continueDictation = () => {
+    setDict(null);
+    api.mpv("set_property", "pause", false);
+  };
+
+  // ---------- the same word in other scenes ----------
+  const resolveUrl = async (o: Occurrence) => {
+    if (o.key === media.key) return media.url;
+    if (o.key.startsWith("plex-") && settings.plex) return (await plex.media(settings.plex, settings, o.key.slice(5))).url;
+    return o.url;
+  };
+  const playOccurrence = async (o: Occurrence) => {
+    try {
+      const url = await resolveUrl(o);
+      await api.mpv("set_property", "speed", 1);
+      await api.mpv("loadfile", url, "replace", -1, `start=${Math.max(0, o.start - 0.4).toFixed(2)},end=${(o.end + 0.5).toFixed(2)}`);
+      await api.mpv("set_property", "pause", false);
+    } catch (err) {
+      toast(String(err));
+    }
+  };
+  const openElsewhere = async (lemma: string) => {
+    if (!popup) return;
+    const items = await api.occurrences(lang, lemma, media.key, cues[popup.cue].start).catch(() => [] as Occurrence[]);
+    if (items.length === 0) {
+      toast(`“${lemma}” has not come up in any other scene of the videos you have prepared so far.`);
+      return;
+    }
+    popupPaused.current = false;
+    hoverPaused.current = false;
+    setPopup(null);
+    const next = { items, idx: 0, back: now.current, lemma };
+    live.current.elsewhere = next;
+    setElsewhere(next);
+    playOccurrence(items[0]);
+  };
+  const closeElsewhere = async () => {
+    const e = live.current.elsewhere;
+    if (!e) return;
+    live.current.elsewhere = null;
+    setElsewhere(null);
+    clock.current = { t: e.back, stamp: performance.now() };
+    // The position must travel with the load command: mpv restores global options
+    // when a file loaded with per-file options (the scene's start/end) is closed.
+    await api.mpv("loadfile", media.url, "replace", -1, `start=${e.back.toFixed(2)}`);
+    await api.mpv("set_property", "pause", true);
+  };
+  const stepElsewhere = useRef<(d: number) => void>(() => {});
+  stepElsewhere.current = (d: number) => {
+    const e = live.current.elsewhere;
+    if (!e) return;
+    const idx = e.idx + d;
+    if (idx < 0) return;
+    if (idx >= e.items.length) {
+      closeElsewhere();
+      return;
+    }
+    const next = { ...e, idx };
+    live.current.elsewhere = next;
+    setElsewhere(next);
+    playOccurrence(e.items[idx]);
   };
 
   // ---------- shadowing ----------
@@ -509,6 +625,14 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       if (e.key === "Escape") exit();
       return;
     }
+    if (elsewhere && !["Escape", "f"].includes(e.key)) {
+      const move: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowDown: 0, " ": 0 };
+      if (e.key in move) {
+        e.preventDefault();
+        stepElsewhere.current(move[e.key]);
+      }
+      return;
+    }
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     const actions: Record<string, () => void> = {
       " ": togglePause,
@@ -528,9 +652,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         if (ci >= 0) saveCard(ci, "", "", "");
       },
       r: startShadow,
+      x: toggleDictation,
+      m: cycleSubMode,
+      g: () => save({ tenseColors: !settings.tenseColors }),
       "[": () => changeSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(baseSpeed) - 1)] ?? 1),
       "]": () => changeSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(baseSpeed) + 1)] ?? 1),
-      Escape: () => (popup ? closePopup() : shadow ? setShadow(null) : fullscreen ? toggleFullscreen() : exit()),
+      Escape: () => (elsewhere ? closeElsewhere() : popup ? closePopup() : shadow ? setShadow(null) : fullscreen ? toggleFullscreen() : exit()),
     };
     if (actions[k]) {
       e.preventDefault();
@@ -565,9 +692,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
   // ---------- render helpers ----------
   const wordClass = (lemma?: string) => {
-    if (!settings.colorWords || !lemma) return "w";
+    if (!lemma) return "w known";
     const st = words.get(lemma) ?? 0;
-    return "w " + (st === 0 ? "new" : st === 1 ? "learning" : "");
+    return "w " + (st === 0 ? "new" : st === 1 ? "learning" : "known");
   };
   const cue = cueIdx >= 0 ? cues[cueIdx] : null;
   const english = cue ? cue.en || translations[cueIdx] || "" : "";
@@ -584,6 +711,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     const langName = LANGS[lang] || lang;
     return (
       <div className="prep-screen">
+        <Backdrop />
         <div className="card prep">
           <h2>{media.title}</h2>
           {phase === "loading" && <p className="muted">Starting the player…</p>}
@@ -715,7 +843,104 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
           </div>
         )}
 
-        <div className="subs" onMouseEnter={onSubsEnter} onMouseLeave={onSubsLeave} onClick={(e) => e.stopPropagation()}>
+        {dictOn && !elsewhere && (
+          <div className="dict-box" onClick={(e) => e.stopPropagation()}>
+            {!dict && <span className="muted">Dictation is on. Listen: the video pauses after each line so you can type what you heard.</span>}
+            {dict && (
+              <>
+                {dict.marks && (
+                  <div className="shadow-words">
+                    {dict.marks.map((m, i) => (
+                      <span key={i} className={m.state}>
+                        {m.w}{" "}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <input
+                  ref={dictInput}
+                  value={dict.input}
+                  readOnly={!!dict.marks}
+                  placeholder="Type what you heard"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => setDict({ ...dict, input: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") dict.marks ? continueDictation() : checkDictation();
+                    else if (e.key === "Tab") {
+                      e.preventDefault();
+                      replay();
+                    } else if (e.key === "Escape") toggleDictation();
+                  }}
+                />
+                <div className="muted small-text">
+                  {dict.marks ? "Enter to continue · Tab to hear it again" : "Enter to check · Tab to hear it again · Esc to leave dictation"}
+                </div>
+              </>
+            )}
+            {dictScore.total > 0 && (
+              <div className="muted small-text">
+                This session: {dictScore.hits} of {dictScore.total} words ({Math.round((dictScore.hits / dictScore.total) * 100)}%)
+              </div>
+            )}
+          </div>
+        )}
+
+        {elsewhere &&
+          (() => {
+            const o = elsewhere.items[elsewhere.idx];
+            const at = o.text.toLowerCase().indexOf(o.word.toLowerCase());
+            const last = elsewhere.idx === elsewhere.items.length - 1;
+            return (
+              <div className="elsewhere" onClick={(e) => e.stopPropagation()}>
+                <div className="elsewhere-head">
+                  <Icon name="film" size={16} />
+                  <strong>{o.title}</strong>
+                  <div className="spacer" />
+                  <span className="muted">
+                    “{elsewhere.lemma}” · scene {elsewhere.idx + 1} of {elsewhere.items.length}
+                  </span>
+                </div>
+                <div className="elsewhere-line" style={{ fontSize: settings.subSize * 0.85 }}>
+                  {at < 0 ? (
+                    o.text
+                  ) : (
+                    <>
+                      {o.text.slice(0, at)}
+                      <mark>{o.text.slice(at, at + o.word.length)}</mark>
+                      {o.text.slice(at + o.word.length)}
+                    </>
+                  )}
+                </div>
+                {o.en && settings.english !== "hide" && <div className="muted">{o.en}</div>}
+                <div className="row">
+                  <button className="small" disabled={elsewhere.idx === 0} onClick={() => stepElsewhere.current(-1)}>
+                    Previous
+                  </button>
+                  <button className="small" onClick={() => stepElsewhere.current(0)}>
+                    Again
+                  </button>
+                  <button className="primary small" onClick={() => stepElsewhere.current(1)}>
+                    {last ? "Finish" : "Next scene"}
+                  </button>
+                  <button className="ghost small" onClick={closeElsewhere}>
+                    Back to my video
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
+
+        <div
+          className={
+            "subs mode-" + settings.subMode + (settings.colorWords ? " marks" : "") +
+            (elsewhere || (dictOn && !(dict && dict.marks && dict.cue === cueIdx)) ? " concealed" : "")
+          }
+          onMouseEnter={onSubsEnter}
+          onMouseLeave={onSubsLeave}
+          onClick={(e) => e.stopPropagation()}
+        >
           {cue && (
             <div className="cue" key={cueIdx}>
               <div className="line target" ref={lineRef} style={{ fontSize: settings.subSize }}>
@@ -724,7 +949,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                     <span
                       key={cueIdx + "-" + i}
                       className={
-                        wordClass(tok.lemma) + (popup && popup.cue === cueIdx && i >= popup.from && i <= popup.to ? " picked" : "")
+                        wordClass(tok.lemma) + (settings.tenseColors && tok.g && TENSES[tok.g] ? " g-" + tok.g : "") + (popup && popup.cue === cueIdx && i >= popup.from && i <= popup.to ? " picked" : "")
                       }
                       data-s={tok.s}
                       data-e={tok.e}
@@ -780,6 +1005,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 const f = freqLabel(popup.lookup.rank);
                 return f ? <div className={"freq f" + f.level}>{"●".repeat(f.level + 1)} {f.label}</div> : null;
               })()}
+            {popup.from === popup.to && cues[popup.cue].tokens[popup.from].g && (
+              <div className={"tense-line g-" + cues[popup.cue].tokens[popup.from].g}>
+                <i /> {TENSE_NAMES[cues[popup.cue].tokens[popup.from].g as string]}
+              </div>
+            )}
             <div className="popup-body">
               {(popup.from === popup.to ? popup.lookup?.entries : popup.phrase)?.slice(0, 4).map((en, i) => (
                 <div key={i} className="entry">
@@ -831,6 +1061,13 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               <button className="small" disabled={!llm || popup.explaining} title={llm ? "" : "Install the explanation model in Setup"} onClick={explain}>
                 <Icon name="sparkles" size={15} /> Explain in context
               </button>
+              {popupLemma && (
+                <button className="small" onClick={() => openElsewhere(popupLemma)} title="Play other scenes from your library where this word is spoken">
+                  <Icon name="film" size={15} /> Hear it elsewhere
+                </button>
+              )}
+            </div>
+            <div className="row">
               <span className="muted small-text">Shift-click another word to select a phrase</span>
             </div>
           </div>
@@ -847,6 +1084,16 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               {prepared?.target_source === "speech" ? " · subtitles written from the audio" : ""}
             </span>
           </div>
+          <div className="spacer" />
+          {settings.tenseColors && lang === "fr" && (
+            <div className="legend">
+              {Object.entries(TENSES).map(([code, name]) => (
+                <span key={code} className={"g-" + code}>
+                  <i /> {name}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="controls" onClick={(e) => e.stopPropagation()}>
@@ -878,6 +1125,15 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 title="English line: shown, blurred until you click it or press E, or hidden"
               >
                 English: {settings.english === "show" ? "shown" : settings.english === "blur" ? "blurred" : "hidden"}
+              </button>
+              <button className={settings.subMode === "full" ? "chip" : "chip on"} onClick={cycleSubMode} title="How the French line is shown: every word equally, known words dimmed so new ones stand out, or only after the line has been spoken (M)">
+                Subtitles: {SUB_MODE_LABEL[settings.subMode] || "all words"}
+              </button>
+              <button className={settings.tenseColors ? "chip on" : "chip"} onClick={() => save({ tenseColors: !settings.tenseColors })} title="Colour verbs by tense (G)">
+                Tenses
+              </button>
+              <button className={dictOn ? "chip on" : "chip"} onClick={toggleDictation} title="Dictation: hear each line without subtitles and type what you heard (X)">
+                Dictation
               </button>
             </div>
             <div className="group transport">
@@ -939,7 +1195,8 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         <aside className="panel" style={{ width: PANEL_W }} onClick={(e) => e.stopPropagation()}>
           <div className="panel-tabs">
             <button className={panel === "transcript" ? "tab active" : "tab"} onClick={() => setPanel("transcript")}>Transcript</button>
-            <button className={panel === "words" ? "tab active" : "tab"} onClick={() => setPanel("words")}>Words to study</button>
+            <button className={panel === "words" ? "tab active" : "tab"} onClick={() => setPanel("words")}>Words</button>
+            <button className={panel === "mine" ? "tab active" : "tab"} onClick={() => setPanel("mine")}>Easy lines</button>
             <div className="spacer" />
             <button className="icon-btn small" onClick={() => setPanel("none")}><Icon name="close" size={16} /></button>
           </div>
@@ -958,6 +1215,57 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 ))}
               </div>
             </>
+          )}
+          {panel === "mine" && (
+            <div className="rows">
+              {!mined && <div className="muted pad">Looking for easy lines…</div>}
+              {mined && (
+                <>
+                  <div className="pad">
+                    <strong>
+                      {mined.length} {mined.length === 1 ? "line" : "lines"} with just one new word
+                    </strong>
+                    <div className="muted">
+                      Every other word in these lines is one you already know, which makes them the easiest to learn from. Mark
+                      common words as known in Vocabulary to find more.
+                    </div>
+                    {mined.length > 0 && (
+                      <button
+                        className="primary small"
+                        style={{ marginTop: 10 }}
+                        onClick={() => {
+                          mined.forEach((m) => saveCard(m.cue, m.word, m.lemma, m.gloss, true));
+                          toast(`Added ${mined.length} lines to review. Their scene clips are being cut in the background.`);
+                          setMined([]);
+                        }}
+                      >
+                        Add all to review
+                      </button>
+                    )}
+                  </div>
+                  {mined.map((m) => (
+                    <div key={m.lemma} className="wrow">
+                      <div className="wmain clickable" onClick={() => playFrom(m.start)} title="Play this line">
+                        <div>{m.text}</div>
+                        <div className="muted">
+                          <strong>{m.word}</strong>
+                          {m.lemma !== m.word.toLowerCase() ? ` (${m.lemma})` : ""} · {m.gloss}
+                        </div>
+                      </div>
+                      <button
+                        className="ghost small"
+                        onClick={() => {
+                          saveCard(m.cue, m.word, m.lemma, m.gloss, true);
+                          setMined(mined.filter((x) => x !== m));
+                        }}
+                      >
+                        Add
+                      </button>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
           )}
           {panel === "words" && (
             <div className="rows">

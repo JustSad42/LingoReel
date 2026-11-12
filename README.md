@@ -25,6 +25,11 @@ model. After that the app works offline and updates itself.
 - **Review** – save words or whole lines; each keeps a short clip of the scene and comes back on a spaced-repetition schedule (FSRS).
 - **Phrase explanations** – a small model running on your own PC explains idioms and grammar in context. Nothing is sent to a cloud service.
 - **Shadowing** – hear a line, record yourself, and see which words were recognised.
+- **Subtitle modes** – show every word, dim the words you know so new ones stand out, or reveal the line only after it has been spoken.
+- **Dictation** – hear a line with no subtitles, type what you heard, and see which words you got.
+- **Tense colours** – verbs are tinted by tense (passé composé, imparfait, futur, conditionnel, subjonctif and more); can be switched off.
+- **Easy lines** – finds every line with exactly one word you do not know and adds them to review in one click.
+- **Hear it elsewhere** – plays other scenes from your prepared videos where the same word is spoken.
 
 French is supported today. Other languages need a dictionary build (`tools/build_dict.py`)
 and, for Japanese or Chinese, a word splitter.
@@ -42,6 +47,9 @@ and, for Japanese or Chinese, a word splitter.
 | T | Transcript panel |
 | W | Save the line for review |
 | R | Shadowing |
+| X | Dictation |
+| M | Subtitle mode |
+| G | Tense colours |
 | [ and ] | Slower / faster |
 | F | Fullscreen |
 | Esc | Close / back |
@@ -52,7 +60,7 @@ Requires Node 20+ and Rust.
 
 ```
 npm install
-npm run tauri dev      # run
+npm run dev:app        # run with a separate data folder, safe next to an installed copy
 npm run tauri build    # installer in src-tauri/target/release/bundle/nsis
 ```
 

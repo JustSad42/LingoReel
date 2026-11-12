@@ -1,0 +1,5 @@
+{
+  "identifier": "com.lingoreel.dev",
+  "productName": "LingoReel Dev",
+  "app": { "windows": [{ "label": "main", "title": "LingoReel (development)", "width": 1400, "height": 860, "minWidth": 960, "minHeight": 600, "transparent": true, "theme": "Dark" }] }
+}

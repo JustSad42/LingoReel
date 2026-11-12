@@ -64,7 +64,10 @@ fn specs() -> Vec<Spec> {
 }
 
 pub fn dir(state: &AppState, id: &str) -> PathBuf {
-    let base = state.dir.join("components");
+    // LINGOREEL_COMPONENTS lets a development build share an existing download folder.
+    let base = std::env::var_os("LINGOREEL_COMPONENTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.dir.join("components"));
     match id {
         "whisper-model" | "llm-model" => base.join("models"),
         id if id.starts_with("dict-") => base.join("dict"),

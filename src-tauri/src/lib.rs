@@ -26,6 +26,8 @@ pub struct AppState {
     pub llm: tokio::sync::Mutex<Option<llm::Server>>,
     /// Serialises GPU-heavy work (Whisper).
     pub prepare_lock: tokio::sync::Mutex<()>,
+    /// Limits concurrent scene-clip encodes.
+    pub clip_slots: tokio::sync::Semaphore,
 }
 
 #[tauri::command]
@@ -57,6 +59,7 @@ pub fn run() {
                 mpv: tokio::sync::Mutex::new(None),
                 llm: tokio::sync::Mutex::new(None),
                 prepare_lock: tokio::sync::Mutex::new(()),
+                clip_slots: tokio::sync::Semaphore::new(2),
             });
             Ok(())
         })
@@ -82,6 +85,8 @@ pub fn run() {
             media::prepared_delete,
             media::media_stats,
             media::media_summaries,
+            media::media_mine,
+            media::word_occurrences,
             media::scan_folder,
             media::probe_file,
             media::map_path,

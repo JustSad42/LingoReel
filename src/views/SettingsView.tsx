@@ -29,7 +29,7 @@ export default function SettingsView() {
     setChecking(false);
   };
 
-  const toggle = (key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords", label: string, hint: string) => (
+  const toggle = (key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors", label: string, hint: string) => (
     <label className="check">
       <input type="checkbox" checked={settings[key]} onChange={(e) => save({ [key]: e.target.checked })} />
       <span>
@@ -53,12 +53,32 @@ export default function SettingsView() {
           <input type="range" min={0.5} max={0.95} step={0.05} value={settings.slowSpeed} onChange={(e) => save({ slowSpeed: +e.target.value })} />
         </label>
         {toggle("colorWords", "Underline words by how well you know them", "orange is new, yellow is learning, plain is known")}
+        {toggle("tenseColors", "Colour verbs by tense", "passé composé, imparfait, futur and others each get their own colour")}
+        <label>
+          French line
+          <select value={settings.subMode} onChange={(e) => save({ subMode: e.target.value })}>
+            <option value="full">Every word shown equally</option>
+            <option value="focus">Words you know are dimmed, new words stand out</option>
+            <option value="listen">Shown only after the line has been spoken</option>
+          </select>
+        </label>
         <label>
           English line
           <select value={settings.english} onChange={(e) => save({ english: e.target.value })}>
             <option value="show">Always shown</option>
             <option value="blur">Blurred until you click it or press E</option>
             <option value="hide">Hidden</option>
+          </select>
+        </label>
+        <label>
+          Interface size
+          <select value={settings.uiScale} onChange={(e) => save({ uiScale: e.target.value })}>
+            <option value="auto">Automatic (fits the window)</option>
+            {[0.85, 1, 1.15, 1.3, 1.5, 1.75, 2].map((z) => (
+              <option key={z} value={String(z)}>
+                {Math.round(z * 100)}%
+              </option>
+            ))}
           </select>
         </label>
         <label>

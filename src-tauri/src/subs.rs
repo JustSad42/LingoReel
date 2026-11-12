@@ -12,6 +12,9 @@ pub struct Tok {
     pub w: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub lemma: Option<String>,
+    /// Verb tense code ("pres", "pc", "imp", ...), for tense colouring.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub g: Option<String>,
     /// When the word is spoken (seconds).
     #[serde(default)]
     pub s: f64,
@@ -190,8 +193,62 @@ pub fn tokenize(lang: &str, text: &str, dict: Option<&mut Dict>) -> Vec<Tok> {
         for t in out.iter_mut().filter(|t| t.w) {
             t.lemma = d.lemma(&t.t);
         }
+        if lang == "fr" {
+            tag_tenses(&mut out, d);
+        }
     }
     out
+}
+
+/// Work out each verb's tense, joining auxiliaries with their participle
+/// ("a mangé" is passé composé, "va manger" is futur proche).
+fn tag_tenses(toks: &mut [Tok], d: &Dict) {
+    const PRIORITY: &[&str] = &["pres", "imp", "fut", "cond", "pp", "subj", "imper", "ps", "ppr", "inf"];
+    let words: Vec<usize> = (0..toks.len()).filter(|&i| toks[i].w).collect();
+    let cands: Vec<Vec<&'static str>> = words
+        .iter()
+        .map(|&i| toks[i].lemma.as_deref().map(|l| d.tenses(&toks[i].t, l)).unwrap_or_default())
+        .collect();
+    let mut tags: Vec<Option<&'static str>> =
+        cands.iter().map(|c| PRIORITY.iter().copied().find(|p| c.contains(p))).collect();
+    let lemma = |k: usize| toks[words[k]].lemma.as_deref().unwrap_or("");
+    for k in 0..words.len() {
+        // auxiliary (avoir/être) up to three words back + past participle
+        if cands[k].contains(&"pp") {
+            for back in 1..=3.min(k) {
+                let a = k - back;
+                if !matches!(lemma(a), "avoir" | "être") {
+                    continue;
+                }
+                let compound = if cands[a].contains(&"pres") {
+                    Some("pc")
+                } else if cands[a].contains(&"imp") {
+                    Some("pqp")
+                } else {
+                    None
+                };
+                if let Some(c) = compound {
+                    tags[a] = Some(c);
+                    tags[k] = Some(c);
+                }
+                break;
+            }
+        }
+        // aller (present) + infinitive
+        if cands[k].contains(&"inf") && tags[k] == Some("inf") {
+            for back in 1..=2.min(k) {
+                let a = k - back;
+                if lemma(a) == "aller" && cands[a].contains(&"pres") {
+                    tags[a] = Some("fp");
+                    tags[k] = Some("fp");
+                    break;
+                }
+            }
+        }
+    }
+    for (k, &i) in words.iter().enumerate() {
+        toks[i].g = tags[k].map(String::from);
+    }
 }
 
 /// Give each word a time slice of the cue in proportion to its length. Used when no
