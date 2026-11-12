@@ -1,0 +1,69 @@
+# LingoReel
+
+Learn a language by watching the movies and series you already own.
+
+LingoReel is a Windows desktop player that shows subtitles in the language you are
+learning and in English at the same time, lights up each word as it is spoken, and
+lets you click any word for its meaning. It plays from your Plex library or from
+plain folders of video files.
+
+## Install
+
+Download `LingoReel_x.y.z_x64-setup.exe` from the
+[latest release](https://github.com/JustSad42/LingoReel/releases/latest) and run it.
+No administrator rights are needed. On first start the Setup screen downloads the
+player engine, dictionary and (optionally) speech recognition and a local language
+model. After that the app works offline and updates itself.
+
+## What it does
+
+- **Two subtitle lines** – target language and English together; English can be shown, blurred until asked for, or hidden.
+- **Word-by-word timing** – Whisper listens to each video once on your GPU, so every word highlights when spoken and badly timed subtitle files are corrected. Videos with no subtitles get them written from the audio.
+- **Click-to-look-up** – offline dictionary (Wiktionary) with the base form, grammar of the form you clicked, gender, pronunciation and how common the word is.
+- **Line navigation** – replay, previous and next line, auto-pause after each line, pause on hover, slow down lines with unknown words.
+- **Known-word tracking** – words are underlined by how well you know them; every video gets a "percent known" difficulty score and a list of words to study first.
+- **Review** – save words or whole lines; each keeps a short clip of the scene and comes back on a spaced-repetition schedule (FSRS).
+- **Phrase explanations** – a small model running on your own PC explains idioms and grammar in context. Nothing is sent to a cloud service.
+- **Shadowing** – hear a line, record yourself, and see which words were recognised.
+
+French is supported today. Other languages need a dictionary build (`tools/build_dict.py`)
+and, for Japanese or Chinese, a word splitter.
+
+## Keys while watching
+
+| Key | Action |
+| --- | --- |
+| Space | Play / pause |
+| A or ← | Previous line |
+| S or ↓ | Replay line |
+| D or → | Next line |
+| E or ↑ | Reveal the English line |
+| P | Auto-pause after each line |
+| T | Transcript panel |
+| W | Save the line for review |
+| R | Shadowing |
+| [ and ] | Slower / faster |
+| F | Fullscreen |
+| Esc | Close / back |
+
+## Building from source
+
+Requires Node 20+ and Rust.
+
+```
+npm install
+npm run tauri dev      # run
+npm run tauri build    # installer in src-tauri/target/release/bundle/nsis
+```
+
+To publish a new version: `.\release.ps1 0.2.0`. GitHub Actions builds and signs the
+installer; installed copies update on their next launch.
+
+## Credits
+
+Dictionary data from [Wiktionary](https://www.wiktionary.org/) via
+[kaikki.org](https://kaikki.org/) and word frequencies from
+[FrequencyWords](https://github.com/hermitdave/FrequencyWords), both CC BY-SA.
+Playback by [mpv](https://mpv.io/), media handling by [FFmpeg](https://ffmpeg.org/),
+speech recognition by [whisper.cpp](https://github.com/ggml-org/whisper.cpp), local
+model serving by [llama.cpp](https://github.com/ggml-org/llama.cpp).
