@@ -277,7 +277,8 @@ mod tests {
         let texts: Vec<&str> = w.iter().map(|h| h.text.as_str()).collect();
         assert_eq!(texts, ["Où", "est", "l'élève"]);
         assert!((w[0].e - 1.30).abs() < 1e-9);
-        assert!((w[1].s - 1.30).abs() < 1e-9 && (w[1].e - 1.60).abs() < 1e-9);
+        // "est" cannot plausibly last longer than 0.275 s, so it starts at 1.325, not at 1.30.
+        assert!((w[1].s - 1.325).abs() < 1e-9 && (w[1].e - 1.60).abs() < 1e-9);
         assert!((w[2].e - 2.30).abs() < 1e-9);
     }
 }
