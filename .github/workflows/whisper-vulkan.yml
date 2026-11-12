@@ -1,0 +1,45 @@
+name: Build Whisper (Vulkan)
+
+# Builds whisper.cpp with the Vulkan backend, which runs on AMD and Intel graphics
+# cards (upstream only publishes NVIDIA and CPU builds for Windows), and attaches it
+# to the data release that the app downloads components from. Run it by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: whisper.cpp tag to build
+        default: v1.9.2
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ inputs.ref }}
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -L -o "$env:RUNNER_TEMP\vulkan_sdk.exe" "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe"
+          & "$env:RUNNER_TEMP\vulkan_sdk.exe" --root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install | Out-Null
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\Bin"
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake -B build -DGGML_VULKAN=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_SDL2=OFF
+          cmake --build build --config Release -j 4 --target whisper-cli
+          Get-ChildItem build\bin\Release
+      - name: Package and upload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          New-Item -ItemType Directory Release | Out-Null
+          Copy-Item build\bin\Release\*.exe, build\bin\Release\*.dll Release\
+          Compress-Archive -Path Release -DestinationPath whisper-vulkan-bin-x64.zip
+          gh release upload data-v1 whisper-vulkan-bin-x64.zip --clobber --repo ${{ github.repository }}
