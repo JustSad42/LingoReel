@@ -116,7 +116,8 @@ async fn chat(state: &AppState, system: &str, user: &str) -> anyhow::Result<Stri
         .await?;
     resp["choices"][0]["message"]["content"]
         .as_str()
-        .map(|s| s.trim().to_string())
+        // Small models add markdown emphasis even when told not to.
+        .map(|s| s.replace('*', "").trim().to_string())
         .ok_or_else(|| anyhow!("the local LLM returned an empty answer"))
 }
 

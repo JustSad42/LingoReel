@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, FileEntry, fmtTime, MediaStats, plex, PlexConn } from "../api";
 import { useApp } from "../App";
+import Icon from "../Icon";
 
 type Source = { kind: "plex"; key: string; title: string; type: string } | { kind: "folder"; path: string };
 type Item = any;
@@ -217,10 +218,13 @@ export default function Library() {
                 className={source?.kind === "plex" && source.key === s.key ? "side-item active" : "side-item"}
                 onClick={() => setSource({ kind: "plex", key: s.key, title: s.title, type: s.type })}
               >
-                {s.title}
+                <Icon name={s.type === "show" ? "tv" : "film"} size={17} />
+                <span>{s.title}</span>
               </button>
             ))}
-            <div className="muted small-text">{p.name}</div>
+            <div className="server-chip">
+              <i /> {p.name}
+            </div>
           </>
         ) : (
           <button className="primary small" disabled={linking} onClick={connectPlex}>
@@ -235,14 +239,17 @@ export default function Library() {
             onClick={() => setSource({ kind: "folder", path: f })}
             title={f}
           >
-            {f.split(/[\\/]/).filter(Boolean).pop()}
+            <Icon name="folder" size={17} />
+            <span>{f.split(/[\\/]/).filter(Boolean).pop()}</span>
           </button>
         ))}
-        <button className="ghost small" onClick={addFolder}>
-          Add folder…
+        <button className="side-item subtle" onClick={addFolder}>
+          <Icon name="plus" size={17} />
+          <span>Add folder</span>
         </button>
-        <button className="ghost small" onClick={openFile}>
-          Open a video file…
+        <button className="side-item subtle" onClick={openFile}>
+          <Icon name="film" size={17} />
+          <span>Open a video file</span>
         </button>
       </aside>
 
@@ -250,6 +257,9 @@ export default function Library() {
         {error && <div className="error">{error}</div>}
         {!source && !error && (
           <div className="empty">
+            <div className="empty-art">
+              <Icon name="film" size={34} />
+            </div>
             <h2>Add your library</h2>
             <p className="muted">Connect your Plex server, or add a folder of videos, to start watching.</p>
           </div>
@@ -260,7 +270,10 @@ export default function Library() {
             <h1>{source.kind === "plex" ? source.title : source.path}</h1>
             <div className="spacer" />
             {source.kind === "plex" && (
-              <input placeholder="Search…" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <label className="search">
+                <Icon name="search" size={16} />
+                <input placeholder="Search this library" value={query} onChange={(e) => setQuery(e.target.value)} />
+              </label>
             )}
             {source.kind === "folder" && (
               <button
@@ -275,7 +288,15 @@ export default function Library() {
             )}
           </div>
         )}
-        {loading && <div className="muted">Loading…</div>}
+        {loading && (
+          <div className="grid">
+            {Array.from({ length: 12 }, (_, i) => (
+              <div key={i} className="poster skeleton">
+                <div className="poster-img" />
+              </div>
+            ))}
+          </div>
+        )}
 
         {source?.kind === "plex" && !show && p && (
           <div className="grid">
@@ -288,7 +309,10 @@ export default function Library() {
                   onClick={() => (i.type === "show" ? setShow(i) : playPlex(i.ratingKey))}
                 >
                   <div className="poster-img">
-                    {i.thumb && <img loading="lazy" src={plex.thumb(p, i.thumb)} alt="" />}
+                    {i.thumb && <img loading="lazy" src={plex.thumb(p, i.thumb)} alt="" onLoad={(e) => e.currentTarget.classList.add("loaded")} />}
+                    <div className="poster-play">
+                      <Icon name={i.type === "show" ? "library" : "play"} size={22} />
+                    </div>
                     {i.type !== "show" && resume(key, i.viewOffset, i.duration)}
                   </div>
                   <div className="poster-title">{i.title}</div>
@@ -306,8 +330,8 @@ export default function Library() {
         {show && p && (
           <div>
             <div className="row head">
-              <button className="ghost small" onClick={() => setShow(null)}>
-                ← Back
+              <button className="icon-btn" onClick={() => setShow(null)} title="Back">
+                <Icon name="back" />
               </button>
               <h1>{show.title}</h1>
               <div className="spacer" />

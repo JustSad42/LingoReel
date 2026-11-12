@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, Cue, Entry, fmtTime, freqLabel, LANGS, Lookup, MediaReq, MediaStats, Prepared, STATUS, SubTrack } from "../api";
 import { useApp } from "../App";
+import Icon from "../Icon";
 
 const PANEL_W = 420;
 const TEXT_CODECS = ["subrip", "srt", "ass", "ssa", "mov_text", "tx3g", "webvtt", "vtt", "text"];
@@ -13,6 +14,8 @@ type Popup = {
   from: number;
   to: number;
   x: number;
+  /** Top of the clicked word, so the popup sits just above the subtitles. */
+  y: number;
   lookup?: Lookup;
   phrase?: Entry[];
   explain?: string;
@@ -388,12 +391,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       const from = Math.min(popup.from, ti);
       const to = Math.max(popup.to, ti);
       const text = toks.slice(from, to + 1).map((k) => k.t).join("");
-      const next: Popup = { cue: ci, from, to, x: popup.x };
+      const next: Popup = { cue: ci, from, to, x: popup.x, y: popup.y };
       setPopup(next);
       api.phrase(lang, text).then((phrase) => setPopup((p) => (p === next ? { ...next, phrase } : p)));
       return;
     }
-    const next: Popup = { cue: ci, from: ti, to: ti, x: rect.left + rect.width / 2 };
+    const next: Popup = { cue: ci, from: ti, to: ti, x: rect.left + rect.width / 2, y: rect.top };
     setPopup(next);
     api
       .lookup(lang, toks[ti].t)
@@ -667,7 +670,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
             {shadow.phase === "listen" && <strong>Listen…</strong>}
             {shadow.phase === "record" && (
               <>
-                <strong className="rec">● Your turn — say the line</strong>
+                <strong className="rec"><i className="rec-dot" /> Your turn: say the line</strong>
                 <button className="small" onClick={() => recorder.current?.stop()}>
                   Done
                 </button>
@@ -714,7 +717,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
         <div className="subs" onMouseEnter={onSubsEnter} onMouseLeave={onSubsLeave} onClick={(e) => e.stopPropagation()}>
           {cue && (
-            <>
+            <div className="cue" key={cueIdx}>
               <div className="line target" ref={lineRef} style={{ fontSize: settings.subSize }}>
                 {cue.tokens.map((tok, i) =>
                   tok.w ? (
@@ -750,14 +753,17 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                     </button>
                   )
                 ))}
-            </>
+            </div>
           )}
         </div>
 
         {popup && cues[popup.cue] && (
           <div
             className="popup"
-            style={{ left: Math.max(190, Math.min(popup.x, window.innerWidth - (panelOpen ? PANEL_W : 0) - 190)) }}
+            style={{
+              left: Math.max(210, Math.min(popup.x, window.innerWidth - (panelOpen ? PANEL_W : 0) - 210)),
+              bottom: window.innerHeight - popup.y + 14,
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="popup-head">
@@ -765,8 +771,8 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               {popupLemma && popupLemma !== popupText.toLowerCase() && <span className="muted">→ {popupLemma}</span>}
               {popup.lookup?.entries[0]?.ipa && <span className="ipa">{popup.lookup.entries[0].ipa}</span>}
               <div className="spacer" />
-              <button className="ghost small" onClick={closePopup}>
-                ✕
+              <button className="icon-btn small" onClick={closePopup}>
+                <Icon name="close" size={16} />
               </button>
             </div>
             {popup.lookup &&
@@ -820,60 +826,111 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                   saveCard(popup.cue, popupText, popupLemma || "", def || popup.explain || "");
                 }}
               >
-                ★ Save for review
+                <Icon name="star" size={15} /> Save for review
               </button>
               <button className="small" disabled={!llm || popup.explaining} title={llm ? "" : "Install the explanation model in Setup"} onClick={explain}>
-                Explain in context
+                <Icon name="sparkles" size={15} /> Explain in context
               </button>
               <span className="muted small-text">Shift-click another word to select a phrase</span>
             </div>
           </div>
         )}
 
+        <div className="topbar" onClick={(e) => e.stopPropagation()}>
+          <button className="icon-btn" onClick={exit} title="Back to library (Esc)">
+            <Icon name="back" />
+          </button>
+          <div className="topbar-title">
+            <strong>{media.title}</strong>
+            <span>
+              {prepared?.aligned ? "Word-by-word timing" : "Estimated word timing"}
+              {prepared?.target_source === "speech" ? " · subtitles written from the audio" : ""}
+            </span>
+          </div>
+        </div>
+
         <div className="controls" onClick={(e) => e.stopPropagation()}>
-          <input
-            className="seek"
-            type="range"
-            min={0}
-            max={duration || 1}
-            step={0.5}
-            value={Math.min(uiTime, duration || 1)}
-            onChange={(e) => seek(+e.target.value)}
-          />
-          <div className="row">
-            <button className="ghost" onClick={exit} title="Back to library (Esc)">←</button>
-            <button onClick={togglePause} title="Play / pause (Space)">{paused ? "▶" : "❚❚"}</button>
-            <button className="ghost" onClick={prevLine} title="Previous line (A or ←)">⏮</button>
-            <button className="ghost" onClick={replay} title="Replay this line (S or ↓)">↺</button>
-            <button className="ghost" onClick={nextLine} title="Next line (D or →)">⏭</button>
-            <span className="time">{fmtTime(uiTime)} / {fmtTime(duration)}</span>
-            <span className="title">{media.title}{prepared && !prepared.aligned ? " · word timing estimated" : ""}</span>
-            <div className="spacer" />
-            <select value={baseSpeed} onChange={(e) => changeSpeed(+e.target.value)} title="Speed ([ and ])">
-              {SPEEDS.map((v) => (
-                <option key={v} value={v}>{v}×</option>
-              ))}
-            </select>
-            {audioTracks.length > 1 && (
-              <select value={aid ?? ""} onChange={(e) => api.mpv("set_property", "aid", +e.target.value)} title="Audio track">
-                {audioTracks.map((t) => (
-                  <option key={t.id} value={t.id}>{(t.lang || "audio") + (t.title ? " · " + t.title : "")}</option>
+          <div className="seek-row">
+            <span className="time">{fmtTime(uiTime)}</span>
+            <input
+              className="seek"
+              type="range"
+              min={0}
+              max={duration || 1}
+              step={0.5}
+              value={Math.min(uiTime, duration || 1)}
+              style={{ "--pct": (duration ? Math.min(100, (uiTime / duration) * 100) : 0) + "%" } as React.CSSProperties}
+              onChange={(e) => seek(+e.target.value)}
+            />
+            <span className="time">{fmtTime(duration)}</span>
+          </div>
+          <div className="control-row">
+            <div className="group">
+              <button className={settings.autoPause ? "chip on" : "chip"} onClick={() => save({ autoPause: !settings.autoPause })} title="Pause after every line (P)">
+                Auto-pause
+              </button>
+              <button className={settings.slowUnknown ? "chip on" : "chip"} onClick={() => save({ slowUnknown: !settings.slowUnknown })} title="Slow down lines with words you do not know yet">
+                Slow hard lines
+              </button>
+              <button
+                className={settings.english === "hide" ? "chip" : "chip on"}
+                onClick={() => save({ english: settings.english === "show" ? "blur" : settings.english === "blur" ? "hide" : "show" })}
+                title="English line: shown, blurred until you click it or press E, or hidden"
+              >
+                English: {settings.english === "show" ? "shown" : settings.english === "blur" ? "blurred" : "hidden"}
+              </button>
+            </div>
+            <div className="group transport">
+              <button className="icon-btn" onClick={prevLine} title="Previous line (A or ←)">
+                <Icon name="prev" />
+              </button>
+              <button className="icon-btn" onClick={replay} title="Replay this line (S or ↓)">
+                <Icon name="replay" />
+              </button>
+              <button className="icon-btn play" onClick={togglePause} title="Play / pause (Space)">
+                <Icon name={paused ? "play" : "pause"} size={24} />
+              </button>
+              <button className="icon-btn" onClick={nextLine} title="Next line (D or →)">
+                <Icon name="next" />
+              </button>
+              <button className="icon-btn" onClick={startShadow} title="Shadowing: hear the line, then record yourself (R)">
+                <Icon name="mic" />
+              </button>
+            </div>
+            <div className="group right">
+              <select value={baseSpeed} onChange={(e) => changeSpeed(+e.target.value)} title="Speed ([ and ])">
+                {SPEEDS.map((v) => (
+                  <option key={v} value={v}>
+                    {v}×
+                  </option>
                 ))}
               </select>
-            )}
-            <button className={settings.autoPause ? "toggle on" : "toggle"} onClick={() => save({ autoPause: !settings.autoPause })} title="Pause after every line (P)">Auto-pause</button>
-            <button className={settings.slowUnknown ? "toggle on" : "toggle"} onClick={() => save({ slowUnknown: !settings.slowUnknown })} title="Slow down lines with words you do not know yet">Slow hard lines</button>
-            <button
-              className="toggle on"
-              onClick={() => save({ english: settings.english === "show" ? "blur" : settings.english === "blur" ? "hide" : "show" })}
-              title="English line: shown, blurred until you click it or press E, or hidden"
-            >
-              EN: {settings.english}
-            </button>
-            <button className="ghost" onClick={startShadow} title="Shadowing: hear the line, then record yourself (R)">🎤</button>
-            <button className="ghost" onClick={() => { const ci = currentLine(); if (ci >= 0) saveCard(ci, "", "", ""); }} title="Save this line for review (W)">★</button>
-            <button className={panelOpen ? "toggle on" : "toggle"} onClick={() => setPanel(panelOpen ? "none" : "transcript")} title="Transcript and word list (T)">Transcript</button>
-            <button className="ghost" onClick={toggleFullscreen} title="Fullscreen (F)">⛶</button>
+              {audioTracks.length > 1 && (
+                <select value={aid ?? ""} onChange={(e) => api.mpv("set_property", "aid", +e.target.value)} title="Audio track">
+                  {audioTracks.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {(t.lang || "audio") + (t.title ? " · " + t.title : "")}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                className="icon-btn"
+                onClick={() => {
+                  const ci = currentLine();
+                  if (ci >= 0) saveCard(ci, "", "", "");
+                }}
+                title="Save this line for review (W)"
+              >
+                <Icon name="star" />
+              </button>
+              <button className={panelOpen ? "icon-btn on" : "icon-btn"} onClick={() => setPanel(panelOpen ? "none" : "transcript")} title="Transcript and word list (T)">
+                <Icon name="panel" />
+              </button>
+              <button className="icon-btn" onClick={toggleFullscreen} title="Fullscreen (F)">
+                <Icon name="fullscreen" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -884,7 +941,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
             <button className={panel === "transcript" ? "tab active" : "tab"} onClick={() => setPanel("transcript")}>Transcript</button>
             <button className={panel === "words" ? "tab active" : "tab"} onClick={() => setPanel("words")}>Words to study</button>
             <div className="spacer" />
-            <button className="ghost small" onClick={() => setPanel("none")}>✕</button>
+            <button className="icon-btn small" onClick={() => setPanel("none")}><Icon name="close" size={16} /></button>
           </div>
           {panel === "transcript" && (
             <>

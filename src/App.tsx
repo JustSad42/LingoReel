@@ -8,6 +8,7 @@ import Player from "./views/Player";
 import Review from "./views/Review";
 import Words from "./views/Words";
 import SettingsView from "./views/SettingsView";
+import Icon from "./Icon";
 
 type Ctx = {
   settings: Settings;
@@ -109,12 +110,12 @@ export default function App() {
     }
   };
 
-  const tabs: [View, string][] = [
-    ["library", "Library"],
-    ["review", "Review"],
-    ["words", "Vocabulary"],
-    ["setup", "Setup"],
-    ["settings", "Settings"],
+  const tabs: [View, string, string][] = [
+    ["library", "Library", "library"],
+    ["review", "Review", "review"],
+    ["words", "Words", "words"],
+    ["setup", "Setup", "download"],
+    ["settings", "Settings", "settings"],
   ];
 
   return (
@@ -123,22 +124,25 @@ export default function App() {
         <Player media={playing} onExit={() => setPlaying(null)} />
       ) : (
         <div className="shell">
-          <nav className="nav">
-            <div className="brand">LingoReel</div>
-            {tabs.map(([id, label]) => (
-              <button key={id} className={view === id ? "tab active" : "tab"} onClick={() => setView(id)}>
-                {label}
-                {id === "review" && dueCount > 0 && <span className="badge">{dueCount}</span>}
+          <div className="glow" />
+          <nav className="rail">
+            <img className="logo" src="/logo.png" alt="LingoReel" />
+            {tabs.map(([id, label, icon]) => (
+              <button key={id} className={view === id ? "rail-item active" : "rail-item"} onClick={() => setView(id)}>
+                <Icon name={icon} size={21} />
+                <span>{label}</span>
+                {id === "review" && dueCount > 0 && <em className="badge">{dueCount}</em>}
               </button>
             ))}
             <div className="spacer" />
             {update && (
-              <button className="primary small" disabled={updating} onClick={installUpdate}>
-                {updating ? "Updating…" : `Update to ${update.version}`}
+              <button className="rail-item update" disabled={updating} onClick={installUpdate} title={`Version ${update.version} is available`}>
+                <Icon name="download" size={21} />
+                <span>{updating ? "Updating" : "Update"}</span>
               </button>
             )}
           </nav>
-          <main className="main">
+          <main className="main" key={view}>
             {view === "library" && <Library />}
             {view === "review" && <Review />}
             {view === "words" && <Words />}
@@ -147,7 +151,11 @@ export default function App() {
           </main>
         </div>
       )}
-      {toastMsg && <div className="toast">{toastMsg}</div>}
+      {toastMsg && (
+        <div className="toast" key={toastMsg}>
+          {toastMsg}
+        </div>
+      )}
     </AppCtx.Provider>
   );
 }

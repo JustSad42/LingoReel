@@ -116,7 +116,26 @@ impl Dict {
                 best = Some((r, ln));
             }
         }
+        if best.is_none() {
+            // Regular plurals and feminines are often missing: "émerveillés" -> "émerveillé".
+            return self.regular_base(n).and_then(|(base, _)| self.lemma_uncached(&base));
+        }
         best.map(|(_, l)| l)
+    }
+
+    /// For a French word the dictionary does not list, the form it is regularly built from.
+    fn regular_base(&self, n: &str) -> Option<(String, &'static str)> {
+        if self.lang != "fr" {
+            return None;
+        }
+        for (suffix, label) in [("es", "feminine plural"), ("s", "plural"), ("e", "feminine"), ("x", "plural")] {
+            if let Some(base) = n.strip_suffix(suffix) {
+                if base.chars().count() >= 3 && self.exists(base) {
+                    return Some((base.to_string(), label));
+                }
+            }
+        }
+        None
     }
 
     fn entries_for(&self, norm: &str, form_tags: Vec<String>) -> Vec<Entry> {
@@ -170,11 +189,28 @@ impl Dict {
         }
         for (l, tags) in by_lemma.into_iter().take(4) {
             if l != n {
-                out.entries.extend(self.entries_for(&l, tags));
+                // "allions" is a verb form: show the verb "aller", not the noun "aller".
+                let verbal = tags.iter().any(|t| {
+                    ["person", "participle", "indicative", "subjunctive", "imperative", "infinitive", "gerund", "conditional"]
+                        .iter()
+                        .any(|k| t.contains(k))
+                });
+                let all = self.entries_for(&l, tags);
+                let fitting: Vec<Entry> = all.iter().filter(|e| (e.pos == "verb") == verbal).cloned().collect();
+                out.entries.extend(if fitting.is_empty() || self.lang != "fr" { all } else { fitting });
             }
         }
         if !own_first {
             out.entries.extend(own);
+        }
+        if out.entries.is_empty() {
+            if let Some((base, label)) = self.regular_base(&n) {
+                let mut inner = self.lookup(&base);
+                for e in inner.entries.iter_mut() {
+                    e.form_tags.insert(0, format!("{label} of {base}"));
+                }
+                out.entries = inner.entries;
+            }
         }
         out.rank = lemma.as_ref().and_then(|l| self.rank(l)).or_else(|| self.rank(&n));
         out

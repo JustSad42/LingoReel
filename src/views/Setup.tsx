@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, Component } from "../api";
 import { useApp } from "../App";
+import Icon from "../Icon";
 
 type Progress = { id: string; done: number; total: number; stage: string };
 
@@ -81,7 +82,9 @@ export default function Setup({ onDone }: { onDone: () => void }) {
                 </div>
               ) : c.installed ? (
                 <>
-                  <span className="ok">Installed</span>
+                  <span className="ok">
+                    <Icon name="check" size={15} /> Installed
+                  </span>
                   {!c.note && (
                     <button className="ghost small" onClick={() => remove(c.id)}>
                       Remove

@@ -76,6 +76,11 @@ pub fn whisper_model_name() -> &'static str {
     if has_nvidia() { "ggml-large-v3-turbo.bin" } else { "ggml-small.bin" }
 }
 
+/// Alignment-head preset matching the installed Whisper model.
+pub fn whisper_dtw_preset() -> &'static str {
+    if has_nvidia() { "large.v3.turbo" } else { "small" }
+}
+
 const LLM_MODEL_FILE: &str = "google_gemma-3-4b-it-Q4_K_M.gguf";
 
 /// Path of an installed component's main file, if present.

@@ -172,7 +172,8 @@ pub async fn whisper_words(
         .current_dir(exe.parent().unwrap())
         .arg("-m").arg(&model)
         .arg("-f").arg(wav)
-        .args(["-l", lang, "-ml", "1", "-sow", "-mc", "0", "-sns", "-pp", "-oj", "-of"])
+        // DTW gives a precise time for every token; it needs flash attention off.
+        .args(["-l", lang, "-mc", "0", "-sns", "-pp", "-dtw", components::whisper_dtw_preset(), "-nfa", "-ojf", "-of"])
         .arg(out_base)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -200,18 +201,87 @@ pub async fn whisper_words(
     }
     let raw = tokio::fs::read(&json_path).await?;
     let v: Value = serde_json::from_str(&String::from_utf8_lossy(&raw))?;
-    let mut out = vec![];
+    Ok(words_from_whisper_json(&v))
+}
+
+/// Turn whisper.cpp's full JSON into words. Each token carries `t_dtw`, the moment
+/// (in 1/100 s) the token finishes being spoken; a word starts where the previous one ended.
+pub fn words_from_whisper_json(v: &Value) -> Vec<Heard> {
+    let mut out: Vec<Heard> = vec![];
     for seg in v["transcription"].as_array().cloned().unwrap_or_default() {
-        let text = seg["text"].as_str().unwrap_or("").trim().to_string();
-        if text.is_empty() || text.starts_with(['[', '(', '*', '♪']) || !text.chars().any(|c| c.is_alphanumeric()) {
+        let seg_text = seg["text"].as_str().unwrap_or("").trim().to_string();
+        if seg_text.is_empty() || seg_text.starts_with(['[', '(', '*', '♪']) {
             continue;
         }
-        let s = seg["offsets"]["from"].as_f64().unwrap_or(0.0) / 1000.0;
-        let e = seg["offsets"]["to"].as_f64().unwrap_or(0.0) / 1000.0;
-        out.push(Heard { text, s, e: e.max(s + 0.02) });
+        // Group tokens into words: a token starting with a space begins a new word.
+        let mut words: Vec<(String, f64)> = vec![];
+        for tok in seg["tokens"].as_array().cloned().unwrap_or_default() {
+            let text = tok["text"].as_str().unwrap_or("");
+            if text.starts_with("[_") || text.is_empty() {
+                continue;
+            }
+            let dtw = tok["t_dtw"].as_f64().unwrap_or(-1.0);
+            let end = if dtw >= 0.0 { dtw / 100.0 } else { tok["offsets"]["to"].as_f64().unwrap_or(0.0) / 1000.0 };
+            let spoken = text.chars().any(|c| c.is_alphanumeric() || c == '\u{fffd}');
+            if text.starts_with(' ') || words.is_empty() {
+                words.push((text.trim().to_string(), if spoken { end } else { -1.0 }));
+            } else if let Some(last) = words.last_mut() {
+                last.0.push_str(text);
+                if spoken {
+                    last.1 = last.1.max(end);
+                }
+            }
+        }
+        // Tokens can split an accented letter in half; the segment text is always intact,
+        // so take the spelling from there when the word counts agree.
+        let clean: Vec<&str> = seg_text.split_whitespace().collect();
+        let use_clean = clean.len() == words.len();
+        let seg_start = seg["offsets"]["from"].as_f64().unwrap_or(0.0) / 1000.0;
+        let mut prev_end = out.last().map(|h: &Heard| h.e).unwrap_or(0.0).max(seg_start - 0.5);
+        for (i, (text, end)) in words.into_iter().enumerate() {
+            let text = if use_clean { clean[i].to_string() } else { text };
+            if end < 0.0 || !text.chars().any(|c| c.is_alphanumeric()) {
+                continue;
+            }
+            let letters = text.chars().filter(|c| c.is_alphanumeric()).count() as f64;
+            let longest = 0.065 * letters + 0.08;
+            let start = prev_end.max(end - longest).min(end - 0.03);
+            out.push(Heard { text, s: start.max(0.0), e: end });
+            prev_end = end;
+        }
     }
-    Ok(out)
+    out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whisper_json_becomes_timed_words() {
+        let v = json!({"transcription": [{
+            "text": " Où est l'élève ?",
+            "offsets": {"from": 1000, "to": 3000},
+            "tokens": [
+                {"text": "[_BEG_]", "t_dtw": -1, "offsets": {"from": 1000, "to": 1000}},
+                {"text": " O", "t_dtw": 120, "offsets": {"from": 1000, "to": 1100}},
+                {"text": "\u{fffd}", "t_dtw": 130, "offsets": {"from": 1100, "to": 1200}},
+                {"text": " est", "t_dtw": 160, "offsets": {"from": 1200, "to": 1500}},
+                {"text": " l", "t_dtw": 170, "offsets": {"from": 1500, "to": 1600}},
+                {"text": "'", "t_dtw": 172, "offsets": {"from": 1600, "to": 1600}},
+                {"text": "élève", "t_dtw": 230, "offsets": {"from": 1600, "to": 2300}},
+                {"text": " ?", "t_dtw": 290, "offsets": {"from": 2300, "to": 2900}}
+            ]
+        }]});
+        let w = words_from_whisper_json(&v);
+        let texts: Vec<&str> = w.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(texts, ["Où", "est", "l'élève"]);
+        assert!((w[0].e - 1.30).abs() < 1e-9);
+        assert!((w[1].s - 1.30).abs() < 1e-9 && (w[1].e - 1.60).abs() < 1e-9);
+        assert!((w[2].e - 2.30).abs() < 1e-9);
+    }
+}
+
 
 async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &PrepareOpts) -> anyhow::Result<Prepared> {
     let key = req.key.as_str();
