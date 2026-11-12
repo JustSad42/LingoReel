@@ -31,8 +31,13 @@ model. After that the app works offline and updates itself.
 - **Easy lines** – finds every line with exactly one word you do not know and adds them to review in one click.
 - **Hear it elsewhere** – plays other scenes from your prepared videos where the same word is spoken.
 
-French is supported today. Other languages need a dictionary build (`tools/build_dict.py`)
-and, for Japanese or Chinese, a word splitter.
+Languages: French, Spanish (Castilian preferred when a video has both Spain and Latin America
+tracks), German, Italian, Portuguese and Japanese. Japanese shows romaji or hiragana above each
+word. Each language has its own dictionary, vocabulary and review cards.
+
+Other conveniences: choose which Plex libraries to show, switch audio language (remembered per
+series), volume control, a cached library that opens instantly, and remembered window size,
+speed, volume and last library.
 
 ## Keys while watching
 
@@ -47,6 +52,8 @@ and, for Japanese or Chinese, a word splitter.
 | T | Transcript panel |
 | W | Save the line for review |
 | R | Shadowing |
+| - and = | Volume (also the mouse wheel) |
+| V | Mute |
 | X | Dictation |
 | M | Subtitle mode |
 | G | Tense colours |

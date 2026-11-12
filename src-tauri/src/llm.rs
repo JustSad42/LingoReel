@@ -191,7 +191,11 @@ pub async fn shadow_score(state: State<'_, AppState>, audio: Vec<u8>, expected: 
     let _busy = state.prepare_lock.lock().await;
     let heard = media::whisper_words(&state, &wav, &lang, &tmp.join("rec"), |_| {}).await?;
     let _ = tokio::fs::remove_dir_all(&tmp).await;
-    let heard_text = heard.iter().map(|h| h.text.trim()).collect::<Vec<_>>().join(" ");
+    let heard_text = heard
+        .iter()
+        .map(|h| h.text.trim())
+        .collect::<Vec<_>>()
+        .join(if matches!(lang.as_str(), "ja" | "zh") { "" } else { " " });
 
     let mut bag: HashMap<String, i32> = HashMap::new();
     for k in heard.iter().flat_map(|h| align::keys(&h.text)) {
@@ -199,7 +203,13 @@ pub async fn shadow_score(state: State<'_, AppState>, audio: Vec<u8>, expected: 
     }
     let mut words = vec![];
     let mut hit = 0usize;
-    for w in expected.split_whitespace() {
+    let unspaced = expected.chars().any(align::is_cjk);
+    let units: Vec<String> = if unspaced {
+        align::keys(&expected)
+    } else {
+        expected.split_whitespace().map(String::from).collect()
+    };
+    for w in units.iter().map(String::as_str) {
         let ks = align::keys(w);
         if ks.is_empty() {
             continue;

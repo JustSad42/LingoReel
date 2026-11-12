@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Tok = { t: string; w: boolean; lemma?: string; g?: string; s: number; e: number };
+export type Tok = { t: string; w: boolean; lemma?: string; g?: string; r?: string; s: number; e: number };
 export type Cue = { start: number; end: number; text: string; tokens: Tok[]; en: string };
 export type Prepared = {
   key: string;
@@ -34,6 +34,8 @@ export type MediaReq = {
   audio: AudioTrack[];
   /** Plex rating key, when the item came from Plex. */
   plexId?: string;
+  /** Series or folder this belongs to; audio choices are remembered per group. */
+  group?: string;
 };
 export type PrepareOpts = {
   target_lang: string;
@@ -138,6 +140,18 @@ export type Settings = {
   tenseColors: boolean;
   /** "auto" or a zoom factor such as 1.25 */
   uiScale: string;
+  /** Plex library keys the user chose not to see. */
+  hiddenLibraries: string[];
+  volume: number;
+  speed: number;
+  /** Side panel left open in the player. */
+  panel: string;
+  /** Library that was open last. */
+  lastSource: unknown;
+  /** Audio track chosen per series or folder. */
+  audioPrefs: Record<string, string>;
+  /** Japanese reading aid above each word: "romaji" | "kana" | "none" */
+  reading: string;
   subSize: number;
   llmUrl: string;
   llmModel: string;
@@ -162,6 +176,13 @@ export const DEFAULTS: Settings = {
   subMode: "full",
   tenseColors: true,
   uiScale: "auto",
+  hiddenLibraries: [],
+  volume: 100,
+  speed: 1,
+  panel: "none",
+  lastSource: null,
+  audioPrefs: {},
+  reading: "romaji",
   subSize: 34,
   llmUrl: "",
   llmModel: "",
@@ -194,6 +215,8 @@ export const api = {
   preparedDelete: (key: string) => invoke("prepared_delete", { key }),
   stats: (key: string) => invoke<MediaStats | null>("media_stats", { key }),
   summaries: (keys: string[]) => invoke<Record<string, MediaStats>>("media_summaries", { keys }),
+  cacheGet: (key: string) => invoke<string | null>("cache_get", { key }),
+  cacheSet: (key: string, value: string) => invoke("cache_set", { key, value }),
   mine: (key: string) => invoke<MinedLine[]>("media_mine", { key }),
   occurrences: (lang: string, lemma: string, skipKey: string, skipStart: number) =>
     invoke<Occurrence[]>("word_occurrences", { lang, lemma, skipKey, skipStart }),
@@ -225,6 +248,16 @@ export const LANGS: Record<string, string> = {
   pt: "Portuguese",
   ja: "Japanese",
 };
+/** Languages that can be studied, with the name shown in Settings. */
+export const LEARN_LANGS: [string, string][] = [
+  ["fr", "French"],
+  ["es", "Spanish (Castellano)"],
+  ["de", "German"],
+  ["it", "Italian"],
+  ["pt", "Portuguese"],
+  ["ja", "Japanese"],
+];
+
 
 /** Verb tenses shown by colour. Unlisted codes (present, infinitive, participles) stay uncoloured. */
 export const TENSES: Record<string, string> = {
@@ -246,13 +279,124 @@ export const TENSE_NAMES: Record<string, string> = {
   ppr: "Participe présent",
 };
 
+const TENSE_LABELS: Record<string, Record<string, string>> = {
+  fr: TENSE_NAMES,
+  es: {
+    pc: "Pretérito perfecto", imp: "Imperfecto", pqp: "Pluscuamperfecto", ps: "Pretérito indefinido", fut: "Futuro",
+    fp: "Ir a + infinitivo", cond: "Condicional", subj: "Subjuntivo", imper: "Imperativo", pres: "Presente",
+    inf: "Infinitivo", pp: "Participio", ppr: "Gerundio",
+  },
+  it: {
+    pc: "Passato prossimo", imp: "Imperfetto", pqp: "Trapassato prossimo", ps: "Passato remoto", fut: "Futuro",
+    cond: "Condizionale", subj: "Congiuntivo", imper: "Imperativo", pres: "Presente", inf: "Infinito",
+    pp: "Participio passato", ppr: "Gerundio",
+  },
+  pt: {
+    pc: "Pretérito perfeito composto", imp: "Imperfeito", pqp: "Mais-que-perfeito", ps: "Pretérito perfeito",
+    fut: "Futuro", fp: "Ir + infinitivo", cond: "Condicional", subj: "Subjuntivo", imper: "Imperativo",
+    pres: "Presente", inf: "Infinitivo", pp: "Particípio", ppr: "Gerúndio",
+  },
+};
+/** Tense names for a language, or null when tenses are not analysed for it. */
+export const tenseNames = (lang: string): Record<string, string> | null => TENSE_LABELS[lang] || null;
+
+// ---------- Japanese readings ----------
+const KANA: Record<string, string> = {
+  あ: "a", い: "i", う: "u", え: "e", お: "o", か: "ka", き: "ki", く: "ku", け: "ke", こ: "ko",
+  さ: "sa", し: "shi", す: "su", せ: "se", そ: "so", た: "ta", ち: "chi", つ: "tsu", て: "te", と: "to",
+  な: "na", に: "ni", ぬ: "nu", ね: "ne", の: "no", は: "ha", ひ: "hi", ふ: "fu", へ: "he", ほ: "ho",
+  ま: "ma", み: "mi", む: "mu", め: "me", も: "mo", や: "ya", ゆ: "yu", よ: "yo",
+  ら: "ra", り: "ri", る: "ru", れ: "re", ろ: "ro", わ: "wa", ゐ: "i", ゑ: "e", を: "o", ん: "n",
+  が: "ga", ぎ: "gi", ぐ: "gu", げ: "ge", ご: "go", ざ: "za", じ: "ji", ず: "zu", ぜ: "ze", ぞ: "zo",
+  だ: "da", ぢ: "ji", づ: "zu", で: "de", ど: "do", ば: "ba", び: "bi", ぶ: "bu", べ: "be", ぼ: "bo",
+  ぱ: "pa", ぴ: "pi", ぷ: "pu", ぺ: "pe", ぽ: "po", ぁ: "a", ぃ: "i", ぅ: "u", ぇ: "e", ぉ: "o", ゔ: "vu",
+};
+const SMALL_Y: Record<string, string> = { ゃ: "a", ゅ: "u", ょ: "o" };
+
+/** Kana (hiragana or katakana) to Hepburn romaji. Anything else passes through. */
+export function toRomaji(kana: string): string {
+  const h = [...kana].map((c) => {
+    const code = c.codePointAt(0) as number;
+    return code >= 0x30a1 && code <= 0x30f6 ? String.fromCodePoint(code - 0x60) : c;
+  });
+  let out = "";
+  let double = false;
+  for (let i = 0; i < h.length; i++) {
+    const c = h[i];
+    if (c === "っ") {
+      double = true;
+      continue;
+    }
+    if (c === "ー") {
+      const last = out.slice(-1);
+      if ("aiueo".includes(last)) out += last;
+      continue;
+    }
+    let r = KANA[c];
+    if (r === undefined) {
+      out += c;
+      double = false;
+      continue;
+    }
+    const y = SMALL_Y[h[i + 1]];
+    if (y && r.endsWith("i") && r.length > 1) {
+      // きゃ -> kya, しゃ -> sha, ちゃ -> cha, じゃ -> ja
+      const stem = r.slice(0, -1);
+      r = ["sh", "ch", "j"].includes(stem) ? stem + y : stem + "y" + y;
+      i++;
+    }
+    if (double) {
+      r = (r.startsWith("ch") ? "t" : r[0]) + r;
+      double = false;
+    }
+    out += r;
+  }
+  return out;
+}
+
+/** Japanese dictation: accept romaji or kana, compare sound by sound. */
+function gradeJapanese(tokens: Tok[], typed: string): { marks: Mark[]; hits: number } {
+  const words = tokens.filter((k) => k.w);
+  const clean = (x: string) => toRomaji(x).toLowerCase().replace(/[^a-z]/g, "");
+  const exp = words.map((k) => clean(k.r || k.t));
+  const all = exp.join("");
+  const got = clean(typed);
+  const n = all.length;
+  const m = got.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = all[i] === got[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ok = new Array<boolean>(n).fill(false);
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (all[i] === got[j]) {
+      ok[i] = true;
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  let at = 0;
+  const marks: Mark[] = words.map((k, wi) => {
+    const len = exp[wi].length;
+    const right = ok.slice(at, at + len).filter(Boolean).length;
+    at += len;
+    const state = len === 0 || right === len ? "hit" : right / len >= 0.7 ? "close" : "miss";
+    return { w: k.t, state };
+  });
+  return { marks, hits: marks.filter((x) => x.state !== "miss").length };
+}
+
 export type Mark = { w: string; state: "hit" | "close" | "miss" };
 
 const plain = (x: string) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const parts = (x: string) => x.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 
 /** Dictation: compare what was typed with the words of the line. */
-export function gradeDictation(tokens: Tok[], typed: string): { marks: Mark[]; hits: number } {
+export function gradeDictation(tokens: Tok[], typed: string, lang = ""): { marks: Mark[]; hits: number } {
+  if (lang === "ja") return gradeJapanese(tokens, typed);
   const words = tokens.filter((k) => k.w);
   const exp: { tok: number; p: string }[] = [];
   words.forEach((k, i) => parts(k.t).forEach((p) => exp.push({ tok: i, p })));
@@ -395,6 +539,7 @@ export const plex = {
     return {
       key: `plex-${ratingKey}`,
       plexId: String(ratingKey),
+      group: `plex-${md.grandparentRatingKey || ratingKey}`,
       title,
       url: mapped ?? withToken(part.key),
       duration: (md.duration || 0) / 1000,

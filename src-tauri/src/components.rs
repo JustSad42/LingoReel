@@ -38,12 +38,27 @@ pub fn has_nvidia() -> bool {
     on_path("nvidia-smi.exe").is_some() || Path::new(r"C:\Windows\System32\nvidia-smi.exe").exists()
 }
 
+/// Languages with a dictionary: (code, name, download size in MB).
+pub const LANGUAGES: &[(&str, &str, u32)] = &[
+    ("fr", "French", 22),
+    ("es", "Spanish", 61),
+    ("de", "German", 58),
+    ("it", "Italian", 42),
+    ("pt", "Portuguese", 22),
+    ("ja", "Japanese", 30),
+];
+
+struct DictSpec {
+    id: String,
+    name: String,
+    size_mb: u32,
+}
+
 fn specs() -> Vec<Spec> {
     let gpu = has_nvidia();
     vec![
         Spec { id: "mpv", name: "Video player engine (mpv)", about: "Plays every video format, including the ones on your server.", size_mb: 35, required: true },
         Spec { id: "ffmpeg", name: "Media tools (FFmpeg)", about: "Reads subtitle and audio tracks out of your video files.", size_mb: 200, required: true },
-        Spec { id: "dict-fr", name: "French dictionary", about: "Offline French to English dictionary with word frequencies (Wiktionary).", size_mb: 22, required: true },
         Spec {
             id: "whisper",
             name: "Speech recognition engine (Whisper)",
@@ -106,27 +121,55 @@ pub fn require(state: &AppState, id: &str) -> anyhow::Result<PathBuf> {
     locate(state, id).ok_or_else(|| anyhow!("Component '{id}' is not installed. Open Setup to download it."))
 }
 
+fn describe(state: &AppState, id: &str, name: &str, about: &str, size_mb: u32, required: bool) -> Component {
+    let found = locate(state, id);
+    let ours = found
+        .as_ref()
+        .map(|p| p.starts_with(&state.dir) || std::env::var_os("LINGOREEL_COMPONENTS").is_some())
+        .unwrap_or(false);
+    Component {
+        id: id.into(),
+        name: name.into(),
+        about: about.into(),
+        size_mb,
+        required,
+        installed: found.is_some(),
+        note: match (&found, ours) {
+            (Some(p), false) => format!("Using the copy already on this PC: {}", p.display()),
+            _ => String::new(),
+        },
+    }
+}
+
 #[tauri::command]
 pub fn components_status(state: State<AppState>) -> Res<Vec<Component>> {
-    Ok(specs()
-        .into_iter()
-        .map(|s| {
-            let found = locate(&state, s.id);
-            let ours = found.as_ref().map(|p| p.starts_with(&state.dir)).unwrap_or(false);
-            Component {
-                id: s.id.into(),
-                name: s.name.into(),
-                about: s.about.into(),
-                size_mb: s.size_mb,
-                required: s.required,
-                installed: found.is_some(),
-                note: match (&found, ours) {
-                    (Some(p), false) => format!("Using the copy already on this PC: {}", p.display()),
-                    _ => String::new(),
-                },
-            }
-        })
-        .collect())
+    let target = {
+        let db = state.db.lock().unwrap();
+        crate::db::setting(&db, "targetLang").as_str().unwrap_or("fr").to_string()
+    };
+    let mut out: Vec<Component> = vec![];
+    for s in specs().into_iter().filter(|s| s.required) {
+        out.push(describe(&state, s.id, s.name, s.about, s.size_mb, true));
+    }
+    // The dictionary for the language being learned is required; others appear once installed.
+    for (code, name, size) in LANGUAGES {
+        let d = DictSpec { id: format!("dict-{code}"), name: format!("{name} dictionary"), size_mb: *size };
+        let is_target = *code == target;
+        if is_target || locate(&state, &d.id).is_some() {
+            out.push(describe(
+                &state,
+                &d.id,
+                &d.name,
+                &format!("Offline {name} to English dictionary (Wiktionary)."),
+                d.size_mb,
+                is_target,
+            ));
+        }
+    }
+    for s in specs().into_iter().filter(|s| !s.required) {
+        out.push(describe(&state, s.id, s.name, s.about, s.size_mb, false));
+    }
+    Ok(out)
 }
 
 /// Download URL(s) for a component. mpv builds are published daily and old ones are

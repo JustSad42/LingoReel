@@ -492,3 +492,21 @@ html.player-active .toast { bottom: auto; top: 26px; }
 .control-row .group:first-child { flex-wrap: wrap; row-gap: 6px; }
 .chip { padding: 5px 11px; font-size: 12px; }
 .popup .row { gap: 6px; }
+
+/* ---------- library management ---------- */
+.side-head { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.side-head h3 { margin: 0 8px; }
+.side-row { display: flex; align-items: center; gap: 2px; }
+.side-row .side-item { flex: 1; }
+.side-item.dimmed { opacity: 0.4; text-decoration: line-through; cursor: default; }
+.side-note { margin: 2px 10px; }
+
+/* ---------- volume and audio ---------- */
+.seek.volume { flex: none; width: 92px; }
+.audio-select { max-width: 190px; text-overflow: ellipsis; }
+
+/* ---------- Japanese readings ---------- */
+ruby { ruby-position: over; }
+rt { font-size: 0.42em; font-weight: 500; color: #d9d6ea; letter-spacing: 0.02em; text-shadow: 0 1px 3px #000; user-select: none; }
+.w.now rt { color: var(--accent); }
+.mode-focus .w.known rt { opacity: 0.9; }

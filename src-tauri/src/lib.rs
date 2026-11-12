@@ -46,6 +46,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -71,6 +72,8 @@ pub fn run() {
             db::words_set,
             db::progress_set,
             db::progress_all,
+            db::cache_get,
+            db::cache_set,
             dict::dict_lookup,
             dict::dict_phrase,
             dict::dict_top_lemmas,

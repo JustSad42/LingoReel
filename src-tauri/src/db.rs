@@ -17,6 +17,7 @@ pub fn open(dir: &Path) -> anyhow::Result<Connection> {
              pos REAL, clip TEXT, image TEXT, created INTEGER, due INTEGER, stability REAL,
              difficulty REAL, reps INTEGER, lapses INTEGER, state INTEGER, last_review INTEGER);
          CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, card_id INTEGER, ts INTEGER, rating INTEGER);
+         CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, v TEXT, ts INTEGER);
          CREATE TABLE IF NOT EXISTS media(key TEXT PRIMARY KEY, title TEXT, position REAL, duration REAL,
              updated INTEGER);",
     )?;
@@ -99,4 +100,21 @@ pub fn progress_all(state: State<AppState>) -> Res<Vec<(String, f64, f64)>> {
     let mut st = db.prepare("SELECT key, position, duration FROM media")?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Remembered library listings, so the library opens instantly and refreshes in the background.
+#[tauri::command]
+pub fn cache_get(state: State<AppState>, key: String) -> Res<Option<String>> {
+    let db = state.db.lock().unwrap();
+    Ok(db.query_row("SELECT v FROM cache WHERE k=?1", [key], |r| r.get(0)).optional()?)
+}
+
+#[tauri::command]
+pub fn cache_set(state: State<AppState>, key: String, value: String) -> Res<()> {
+    let db = state.db.lock().unwrap();
+    db.execute(
+        "INSERT INTO cache VALUES(?1,?2,?3) ON CONFLICT(k) DO UPDATE SET v=?2, ts=?3",
+        params![key, value, now()],
+    )?;
+    Ok(())
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { api } from "../api";
+import { api, LEARN_LANGS } from "../api";
 import { useApp } from "../App";
 
 export default function SettingsView() {
@@ -93,13 +93,27 @@ export default function SettingsView() {
         <label>
           I am learning
           <select value={settings.targetLang} onChange={(e) => save({ targetLang: e.target.value })}>
-            <option value="fr">French</option>
+            {LEARN_LANGS.map(([code, name]) => (
+              <option key={code} value={code}>
+                {name}
+              </option>
+            ))}
           </select>
         </label>
         <p className="muted">
-          French is fully supported today. Japanese needs its own word splitter and dictionary and is planned as a later
-          update.
+          Each language has its own dictionary (downloaded in Setup) and its own vocabulary and review cards. For Spanish,
+          Castilian audio and subtitles are preferred when a video has both Spain and Latin America versions.
         </p>
+        {settings.targetLang === "ja" && (
+          <label>
+            Japanese reading aid above each word
+            <select value={settings.reading} onChange={(e) => save({ reading: e.target.value })}>
+              <option value="romaji">Romaji (Latin letters), for listening and speaking</option>
+              <option value="kana">Hiragana</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+        )}
       </section>
 
       <section className="card">

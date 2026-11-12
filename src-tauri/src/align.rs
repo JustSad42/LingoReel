@@ -14,11 +14,20 @@ pub struct Heard {
 
 /// Comparable pieces of a word: lowercase, split on apostrophes/hyphens/punctuation.
 pub fn keys(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|p| !p.is_empty())
-        .map(|p| p.to_string())
-        .collect()
+    let mut out = vec![];
+    for piece in text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()) {
+        if piece.chars().any(is_cjk) {
+            // No spaces between words: compare character by character.
+            out.extend(piece.chars().map(|c| c.to_string()));
+        } else {
+            out.push(piece.to_string());
+        }
+    }
+    out
+}
+
+pub fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{3040}'..='\u{30ff}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
 }
 
 fn deaccent(s: &str) -> String {
@@ -314,14 +323,14 @@ pub fn align(cues: &mut [Cue], heard_words: &[Heard]) -> AlignStats {
 }
 
 /// Build cues straight from Whisper's words when there is no subtitle file at all.
-pub fn cues_from_heard(heard: &[Heard]) -> Vec<Cue> {
+pub fn cues_from_heard(heard: &[Heard], spaced: bool) -> Vec<Cue> {
     let mut cues: Vec<Cue> = vec![];
     let mut cur: Vec<&Heard> = vec![];
     let flush = |cur: &mut Vec<&Heard>, cues: &mut Vec<Cue>| {
         if cur.is_empty() {
             return;
         }
-        let text = cur.iter().map(|h| h.text.trim()).collect::<Vec<_>>().join(" ");
+        let text = cur.iter().map(|h| h.text.trim()).collect::<Vec<_>>().join(if spaced { " " } else { "" });
         cues.push(Cue {
             start: cur[0].s,
             end: cur.last().unwrap().e + 0.2,
@@ -333,7 +342,7 @@ pub fn cues_from_heard(heard: &[Heard]) -> Vec<Cue> {
     for h in heard {
         if let Some(last) = cur.last() {
             let len: usize = cur.iter().map(|x| x.text.len() + 1).sum();
-            let sentence_end = last.text.trim_end().ends_with(['.', '?', '!', '…']);
+            let sentence_end = last.text.trim_end().ends_with(['.', '?', '!', '…', '。', '？', '！']);
             let pause = h.s - last.e;
             if pause > 0.8 || (sentence_end && (len > 24 || pause > 0.3)) || len > 80 {
                 flush(&mut cur, &mut cues);
@@ -421,9 +430,26 @@ mod tests {
     }
 
     #[test]
+    fn japanese_aligns_by_character() {
+        assert_eq!(keys("映画を見た"), ["映", "画", "を", "見", "た"]);
+        let mut cues = vec![Cue {
+            start: 0.5,
+            end: 3.0,
+            text: "映画を見た".into(),
+            tokens: tokenize("ja", "映画を見た", None),
+            ..Default::default()
+        }];
+        let h = heard(&[("映", 1.0, 1.2), ("画", 1.2, 1.5), ("を", 1.5, 1.6), ("見", 1.6, 1.9), ("た", 1.9, 2.1)]);
+        let stats = align(&mut cues, &h);
+        assert_eq!(stats.matched, cues[0].tokens.iter().filter(|t| t.w).count());
+        let first = cues[0].tokens.iter().find(|t| t.t == "映画").unwrap();
+        assert!((first.s - 1.0).abs() < 0.01 && (first.e - 1.5).abs() < 0.01);
+    }
+
+    #[test]
     fn builds_cues_from_speech() {
         let h = heard(&[("Bonjour.", 0.0, 0.5), ("Ça", 2.0, 2.2), ("va", 2.2, 2.4), ("bien?", 2.4, 2.8)]);
-        let cues = cues_from_heard(&h);
+        let cues = cues_from_heard(&h, true);
         assert_eq!(cues.len(), 2);
         assert_eq!(cues[1].text, "Ça va bien?");
     }

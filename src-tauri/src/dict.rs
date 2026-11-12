@@ -57,7 +57,7 @@ fn classify_tense(tags: &str) -> Option<&'static str> {
         "cond"
     } else if has("future") {
         "fut"
-    } else if has("historic") {
+    } else if has("historic") || (has("preterite") && !has("present")) {
         "ps"
     } else if has("imperfect") {
         "imp"
@@ -164,6 +164,9 @@ impl Dict {
                 continue;
             }
             let r = self.rank(&ln).unwrap_or(999_999);
+            // A form of a very common verb is almost always that verb, even when the form
+            // also has its own entry: Spanish "vamos" is "ir", not the interjection.
+            let r = if r <= 300 { r / 4 } else { r };
             if best.as_ref().map(|(br, _)| r < *br).unwrap_or(true) {
                 best = Some((r, ln));
             }

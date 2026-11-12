@@ -119,7 +119,7 @@ export default function Setup({ onDone }: { onDone: () => void }) {
       {group(
         "Required",
         "The player, subtitle reader and dictionary.",
-        comps.filter((c) => c.required),
+        comps.filter((c) => c.required || c.id.startsWith("dict-")),
         allBtn(requiredMissing, "Download all"),
       )}
       {group(

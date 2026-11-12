@@ -127,9 +127,27 @@ fn pick_sub<'a>(tracks: &'a [SubTrack], lang: &str, choice: &str) -> Option<&'a 
     // Full dialogue tracks first: not forced, not signs/songs only.
     candidates.sort_by_key(|t| {
         let title = t.title.to_lowercase();
-        (t.forced || title.contains("forc") || title.contains("sign") || title.contains("song")) as u8
+        let partial = (t.forced || title.contains("forc") || title.contains("sign") || title.contains("song")) as i32;
+        partial * 10 - variant_score(lang, &t.lang, &t.title)
     });
     candidates.first().copied()
+}
+
+/// Prefer the regional variant the learner asked for. Spanish means Castilian (Spain)
+/// here, so European tracks beat Latin American ones when a video has both.
+fn variant_score(lang: &str, tag: &str, title: &str) -> i32 {
+    if lang != "es" {
+        return 0;
+    }
+    let text = format!("{} {}", tag.to_lowercase(), title.to_lowercase());
+    let has = |keys: &[&str]| keys.iter().any(|k| text.contains(k));
+    if has(&["es-es", "castellano", "castilian", "españa", "spain", "european", "europe"]) {
+        1
+    } else if has(&["es-419", "es-mx", "es-ar", "latin", "latino", "mexic", "américa", "america"]) {
+        -1
+    } else {
+        0
+    }
 }
 
 fn emit(app: &AppHandle, key: &str, stage: &str, pct: f64, note: &str) {
@@ -204,12 +222,12 @@ pub async fn whisper_words(
     }
     let raw = tokio::fs::read(&json_path).await?;
     let v: Value = serde_json::from_str(&String::from_utf8_lossy(&raw))?;
-    Ok(words_from_whisper_json(&v))
+    Ok(words_from_whisper_json(&v, matches!(lang, "ja" | "zh")))
 }
 
 /// Turn whisper.cpp's full JSON into words. Each token carries `t_dtw`, the moment
 /// (in 1/100 s) the token finishes being spoken; a word starts where the previous one ended.
-pub fn words_from_whisper_json(v: &Value) -> Vec<Heard> {
+pub fn words_from_whisper_json(v: &Value, unspaced: bool) -> Vec<Heard> {
     let mut out: Vec<Heard> = vec![];
     for seg in v["transcription"].as_array().cloned().unwrap_or_default() {
         let seg_text = seg["text"].as_str().unwrap_or("").trim().to_string();
@@ -226,7 +244,8 @@ pub fn words_from_whisper_json(v: &Value) -> Vec<Heard> {
             let dtw = tok["t_dtw"].as_f64().unwrap_or(-1.0);
             let end = if dtw >= 0.0 { dtw / 100.0 } else { tok["offsets"]["to"].as_f64().unwrap_or(0.0) / 1000.0 };
             let spoken = text.chars().any(|c| c.is_alphanumeric() || c == '\u{fffd}');
-            if text.starts_with(' ') || words.is_empty() {
+            // Japanese and Chinese have no spaces, so every token stands alone.
+            if unspaced || text.starts_with(' ') || words.is_empty() {
                 words.push((text.trim().to_string(), if spoken { end } else { -1.0 }));
             } else if let Some(last) = words.last_mut() {
                 last.0.push_str(text);
@@ -238,7 +257,7 @@ pub fn words_from_whisper_json(v: &Value) -> Vec<Heard> {
         // Tokens can split an accented letter in half; the segment text is always intact,
         // so take the spelling from there when the word counts agree.
         let clean: Vec<&str> = seg_text.split_whitespace().collect();
-        let use_clean = clean.len() == words.len();
+        let use_clean = !unspaced && clean.len() == words.len();
         let seg_start = seg["offsets"]["from"].as_f64().unwrap_or(0.0) / 1000.0;
         let mut prev_end = out.last().map(|h: &Heard| h.e).unwrap_or(0.0).max(seg_start - 0.5);
         for (i, (text, end)) in words.into_iter().enumerate() {
@@ -276,7 +295,7 @@ mod tests {
                 {"text": " ?", "t_dtw": 290, "offsets": {"from": 2300, "to": 2900}}
             ]
         }]});
-        let w = words_from_whisper_json(&v);
+        let w = words_from_whisper_json(&v, false);
         let texts: Vec<&str> = w.iter().map(|h| h.text.as_str()).collect();
         assert_eq!(texts, ["Où", "est", "l'élève"]);
         assert!((w[0].e - 1.30).abs() < 1e-9);
@@ -307,7 +326,8 @@ async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Prepa
     let audio = req
         .audio
         .iter()
-        .find(|a| lang2(&a.lang) == opts.target_lang)
+        .filter(|a| lang2(&a.lang) == opts.target_lang)
+        .max_by_key(|a| variant_score(&opts.target_lang, &a.lang, &a.title))
         .or_else(|| req.audio.first());
     let mut note = String::new();
     if let Some(a) = audio {
@@ -394,7 +414,7 @@ async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Prepa
         if heard.is_empty() {
             bail!("No subtitles could be read and no speech was recognised.");
         }
-        cues = align::cues_from_heard(&heard);
+        cues = align::cues_from_heard(&heard, !matches!(opts.target_lang.as_str(), "ja" | "zh"));
         target_source = "speech";
     }
     let lang = opts.target_lang.clone();

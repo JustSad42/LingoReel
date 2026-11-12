@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api, Cue, Entry, fmtTime, freqLabel, gradeDictation, LANGS, Lookup, Mark, MediaReq, MediaStats, MinedLine, Occurrence, plex,
-  Prepared, STATUS, SubTrack, TENSE_NAMES, TENSES,
+  Prepared, STATUS, SubTrack, tenseNames, TENSES, toRomaji,
 } from "../api";
 import { useApp } from "../App";
 import Icon from "../Icon";
@@ -89,11 +89,15 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(media.duration);
   const [uiTime, setUiTime] = useState(0);
-  const [baseSpeed, setBaseSpeed] = useState(1);
+  const [baseSpeed, setBaseSpeed] = useState(settings.speed || 1);
+  const [volume, setVolume] = useState(settings.volume ?? 100);
+  const [muted, setMuted] = useState(false);
   const [cueIdx, setCueIdx] = useState(-1);
   const [audioTracks, setAudioTracks] = useState<any[]>([]);
   const [aid, setAid] = useState<number | null>(null);
-  const [panel, setPanel] = useState<"none" | "transcript" | "words" | "mine">("none");
+  const [panel, setPanel] = useState<"none" | "transcript" | "words" | "mine">(
+    (["transcript", "words", "mine"].includes(settings.panel) ? settings.panel : "none") as "none",
+  );
   const [mined, setMined] = useState<MinedLine[] | null>(null);
   const [dictOn, setDictOn] = useState(false);
   const [dict, setDict] = useState<Dictation | null>(null);
@@ -126,6 +130,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere });
   live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere };
   const dictInput = useRef<HTMLInputElement>(null);
+  const audioApplied = useRef(false);
+  const volTimer = useRef<number>();
+  const names = tenseNames(lang);
 
   const cues = prepared?.cues ?? [];
   cuesRef.current = cues;
@@ -138,8 +145,10 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       const saved = (await api.progressAll()).find(([k]) => k === media.key);
       const pos = saved && saved[2] > 0 && saved[1] / saved[2] < 0.97 ? Math.max(0, saved[1] - 3) : 0;
       await api.mpv("set_property", "alang", `${lang},${{ fr: "fre,fra", ja: "jpn", es: "spa", de: "ger,deu", it: "ita" }[lang] || lang}`);
+      audioApplied.current = false;
       await api.mpv("set_property", "pause", false);
-      await api.mpv("set_property", "speed", 1);
+      await api.mpv("set_property", "speed", live.current.baseSpeed);
+      await api.mpv("set_property", "volume", live.current.settings.volume ?? 100);
       await api.mpv("loadfile", media.url, "replace", -1, `start=${pos.toFixed(2)}`);
     },
     [media],
@@ -230,6 +239,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         case "aid":
           setAid(typeof ev.data === "number" ? ev.data : null);
           break;
+        case "volume":
+          if (typeof ev.data === "number") setVolume(Math.round(ev.data));
+          break;
+        case "mute":
+          setMuted(!!ev.data);
+          break;
       }
     });
     return () => {
@@ -237,12 +252,47 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     };
   }, []);
 
-  // Play the audio track the subtitles were matched against.
+  // Choose the audio track once per load: the one picked last time for this series, otherwise
+  // the one the subtitles were matched against. After that the choice belongs to the viewer.
+  const audioKey = (t: any) => `${t.lang || "und"}|${t.title || ""}`;
+  const trackName = (t: any) => {
+    const code = String(t.lang || "").toLowerCase();
+    const short: Record<string, string> = { fre: "fr", fra: "fr", eng: "en", spa: "es", ger: "de", deu: "de", ita: "it", por: "pt", jpn: "ja" };
+    const language = LANGS[short[code] || code.slice(0, 2)] || t.lang || "Unknown language";
+    const channels = t["demux-channel-count"];
+    const layout = channels === 2 ? "stereo" : channels === 6 ? "5.1" : channels === 8 ? "7.1" : channels === 1 ? "mono" : "";
+    return [language, t.title, layout].filter(Boolean).join(" · ");
+  };
   useEffect(() => {
-    if (!prepared || prepared.audio_index == null) return;
-    const t = audioTracks.find((a) => a["ff-index"] === prepared.audio_index);
-    if (t && t.id !== aid) api.mpv("set_property", "aid", t.id);
+    if (!prepared || audioApplied.current || audioTracks.length === 0 || live.current.elsewhere) return;
+    audioApplied.current = true;
+    const wanted = settings.audioPrefs[media.group || media.key];
+    const t =
+      (wanted && audioTracks.find((a) => audioKey(a) === wanted)) ||
+      audioTracks.find((a) => a["ff-index"] === prepared.audio_index);
+    if (t && !t.selected) api.mpv("set_property", "aid", t.id);
   }, [audioTracks, prepared]);
+  const pickAudio = (id: number) => {
+    api.mpv("set_property", "aid", id);
+    const t = audioTracks.find((a) => a.id === id);
+    if (t) save({ audioPrefs: { ...settings.audioPrefs, [media.group || media.key]: audioKey(t) } });
+  };
+
+  // ---------- volume ----------
+  const changeVolume = (v: number) => {
+    const next = Math.max(0, Math.min(130, Math.round(v)));
+    setVolume(next);
+    api.mpv("set_property", "volume", next);
+    if (muted && next > 0) api.mpv("set_property", "mute", false);
+    window.clearTimeout(volTimer.current);
+    volTimer.current = window.setTimeout(() => save({ volume: next }), 500);
+  };
+  const toggleMute = () => api.mpv("set_property", "mute", !muted);
+
+  useEffect(() => {
+    if (settings.panel !== panel) save({ panel });
+  }, [panel]);
+
 
   // ---------- frame loop: current line, current word, auto-pause ----------
   useEffect(() => {
@@ -386,6 +436,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const togglePause = () => api.mpv("set_property", "pause", !pausedRef.current);
   const changeSpeed = (v: number) => {
     setBaseSpeed(v);
+    save({ speed: v });
     api.mpv("set_property", "speed", v);
   };
   const toggleFullscreen = async () => {
@@ -436,7 +487,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     const next: Popup = { cue: ci, from: ti, to: ti, x: rect.left + rect.width / 2, y: rect.top };
     setPopup(next);
     api
-      .lookup(lang, toks[ti].t)
+      .lookup(lang, lang === "ja" ? toks[ti].lemma || toks[ti].t : toks[ti].t)
       .then((lookup) => setPopup((p) => (p === next ? { ...next, lookup } : p)))
       .catch((err) => toast(String(err)));
   };
@@ -506,7 +557,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   };
   const checkDictation = () => {
     if (!dict) return;
-    const { marks, hits } = gradeDictation(cuesRef.current[dict.cue].tokens, dict.input);
+    const { marks, hits } = gradeDictation(cuesRef.current[dict.cue].tokens, dict.input, lang);
     setDict({ ...dict, marks });
     setDictScore((sc) => ({ hits: sc.hits + hits, total: sc.total + marks.length }));
   };
@@ -554,6 +605,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     clock.current = { t: e.back, stamp: performance.now() };
     // The position must travel with the load command: mpv restores global options
     // when a file loaded with per-file options (the scene's start/end) is closed.
+    audioApplied.current = false;
     await api.mpv("loadfile", media.url, "replace", -1, `start=${e.back.toFixed(2)}`);
     await api.mpv("set_property", "pause", true);
   };
@@ -655,6 +707,10 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       x: toggleDictation,
       m: cycleSubMode,
       g: () => save({ tenseColors: !settings.tenseColors }),
+      "-": () => changeVolume(volume - 5),
+      "=": () => changeVolume(volume + 5),
+      "+": () => changeVolume(volume + 5),
+      v: toggleMute,
       "[": () => changeSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(baseSpeed) - 1)] ?? 1),
       "]": () => changeSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(baseSpeed) + 1)] ?? 1),
       Escape: () => (elsewhere ? closeElsewhere() : popup ? closePopup() : shadow ? setShadow(null) : fullscreen ? toggleFullscreen() : exit()),
@@ -790,7 +846,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const panelOpen = panel !== "none";
   return (
     <div className={"player" + (controls || paused ? " show-controls" : "")} onMouseMove={wake} onClick={() => popup && closePopup()}>
-      <div className="stage" style={{ right: panelOpen ? PANEL_W : 0 }} onDoubleClick={toggleFullscreen}>
+      <div className="stage" style={{ right: panelOpen ? PANEL_W : 0 }} onDoubleClick={toggleFullscreen}
+        onWheel={(e) => {
+          if (!(e.target as HTMLElement).closest(".popup, .dict-box, .elsewhere")) changeVolume(volume + (e.deltaY < 0 ? 5 : -5));
+        }}
+      >
         <div className="click-catcher" onClick={() => (popup ? closePopup() : togglePause())} />
 
         {shadow && (
@@ -955,7 +1015,14 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                       data-e={tok.e}
                       onClick={(e) => openWord(e, cueIdx, i)}
                     >
-                      {tok.t}
+                      {lang === "ja" && tok.r && settings.reading !== "none" && !(settings.reading === "kana" && tok.r === tok.t) ? (
+                        <ruby>
+                          {tok.t}
+                          <rt>{settings.reading === "romaji" ? toRomaji(tok.r) : tok.r}</rt>
+                        </ruby>
+                      ) : (
+                        tok.t
+                      )}
                     </span>
                   ) : (
                     <span key={cueIdx + "-" + i}>{tok.t}</span>
@@ -994,7 +1061,13 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
             <div className="popup-head">
               <span className="popup-word">{popupText}</span>
               {popupLemma && popupLemma !== popupText.toLowerCase() && <span className="muted">→ {popupLemma}</span>}
-              {popup.lookup?.entries[0]?.ipa && <span className="ipa">{popup.lookup.entries[0].ipa}</span>}
+              {lang === "ja" && popup.from === popup.to && cues[popup.cue].tokens[popup.from].r ? (
+                <span className="ipa">
+                  {cues[popup.cue].tokens[popup.from].r} · {toRomaji(cues[popup.cue].tokens[popup.from].r as string)}
+                </span>
+              ) : (
+                popup.lookup?.entries[0]?.ipa && <span className="ipa">{popup.lookup.entries[0].ipa}</span>
+              )}
               <div className="spacer" />
               <button className="icon-btn small" onClick={closePopup}>
                 <Icon name="close" size={16} />
@@ -1005,9 +1078,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 const f = freqLabel(popup.lookup.rank);
                 return f ? <div className={"freq f" + f.level}>{"●".repeat(f.level + 1)} {f.label}</div> : null;
               })()}
-            {popup.from === popup.to && cues[popup.cue].tokens[popup.from].g && (
+            {popup.from === popup.to && names && cues[popup.cue].tokens[popup.from].g && (
               <div className={"tense-line g-" + cues[popup.cue].tokens[popup.from].g}>
-                <i /> {TENSE_NAMES[cues[popup.cue].tokens[popup.from].g as string]}
+                <i /> {(names || {})[cues[popup.cue].tokens[popup.from].g as string] || ""}
               </div>
             )}
             <div className="popup-body">
@@ -1085,13 +1158,15 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
             </span>
           </div>
           <div className="spacer" />
-          {settings.tenseColors && lang === "fr" && (
+          {settings.tenseColors && names && (
             <div className="legend">
-              {Object.entries(TENSES).map(([code, name]) => (
-                <span key={code} className={"g-" + code}>
-                  <i /> {name}
-                </span>
-              ))}
+              {Object.keys(TENSES)
+                .filter((code) => names[code])
+                .map((code) => (
+                  <span key={code} className={"g-" + code}>
+                    <i /> {names[code]}
+                  </span>
+                ))}
             </div>
           )}
         </div>
@@ -1162,14 +1237,27 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 ))}
               </select>
               {audioTracks.length > 1 && (
-                <select value={aid ?? ""} onChange={(e) => api.mpv("set_property", "aid", +e.target.value)} title="Audio track">
+                <select className="audio-select" value={aid ?? ""} onChange={(e) => pickAudio(+e.target.value)} title="Audio language. Your choice is remembered for this series.">
                   {audioTracks.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {(t.lang || "audio") + (t.title ? " · " + t.title : "")}
+                      {trackName(t)}
                     </option>
                   ))}
                 </select>
               )}
+              <button className="icon-btn" onClick={toggleMute} title="Mute (V)">
+                <Icon name={muted || volume === 0 ? "mute" : "volume"} />
+              </button>
+              <input
+                className="seek volume"
+                type="range"
+                min={0}
+                max={130}
+                value={muted ? 0 : volume}
+                style={{ "--pct": ((muted ? 0 : volume) / 130) * 100 + "%" } as React.CSSProperties}
+                onChange={(e) => changeVolume(+e.target.value)}
+                title={`Volume ${volume}% (- and =, or the mouse wheel)`}
+              />
               <button
                 className="icon-btn"
                 onClick={() => {

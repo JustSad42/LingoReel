@@ -24,7 +24,46 @@ export default function Library() {
   const { settings, save, toast, play } = useApp();
   const p = settings.plex;
   const [sections, setSections] = useState<Item[]>([]);
-  const [source, setSource] = useState<Source | null>(null);
+  const [source, setSource] = useState<Source | null>((settings.lastSource as Source) ?? null);
+  const [managing, setManaging] = useState(false);
+  const request = useRef(0);
+  const hidden = settings.hiddenLibraries;
+
+  /** Show what was saved last time straight away, then refresh from the server in the background. */
+  const cached = async <T,>(key: string, fetcher: () => Promise<T>, apply: (v: T) => void) => {
+    const id = ++request.current;
+    let had = false;
+    try {
+      const raw = await api.cacheGet(key);
+      if (raw && id === request.current) {
+        apply(JSON.parse(raw));
+        had = true;
+      }
+    } catch {
+      /* no cache yet */
+    }
+    if (!had) setLoading(true);
+    try {
+      const fresh = await fetcher();
+      if (id === request.current) {
+        apply(fresh);
+        setError("");
+      }
+      api.cacheSet(key, JSON.stringify(fresh));
+    } catch (e) {
+      if (!had && id === request.current) setError(String(e));
+    }
+    if (id === request.current) setLoading(false);
+  };
+  const slim = (list: Item[]): Item[] =>
+    (list || []).map((m) => ({
+      ratingKey: m.ratingKey, title: m.title, thumb: m.thumb, year: m.year, type: m.type, leafCount: m.leafCount,
+      viewOffset: m.viewOffset, duration: m.duration, parentIndex: m.parentIndex, index: m.index,
+    }));
+
+  useEffect(() => {
+    save({ lastSource: source });
+  }, [source]);
   const [items, setItems] = useState<Item[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [show, setShow] = useState<Item | null>(null);
@@ -47,46 +86,46 @@ export default function Library() {
       setSections([]);
       return;
     }
+    const applySections = (dirs: Item[]) => {
+      setSections(dirs);
+      const first = dirs.find((d) => !hidden.includes(d.key));
+      setSource((cur) => cur ?? (first ? { kind: "plex", key: first.key, title: first.title, type: first.type } : null));
+    };
+    const key = `plex:${p.url}:sections`;
+    api
+      .cacheGet(key)
+      .then((raw) => raw && applySections(JSON.parse(raw)))
+      .catch(() => {});
     plex
       .get(p, "/library/sections")
       .then((mc) => {
-        const dirs = (mc.Directory || []).filter((d: Item) => d.type === "movie" || d.type === "show");
-        setSections(dirs);
+        const dirs = (mc.Directory || [])
+          .filter((d: Item) => d.type === "movie" || d.type === "show")
+          .map((d: Item) => ({ key: d.key, title: d.title, type: d.type }));
+        applySections(dirs);
         setError("");
-        setSource((cur) => cur ?? (dirs[0] ? { kind: "plex", key: dirs[0].key, title: dirs[0].title, type: dirs[0].type } : null));
+        api.cacheSet(key, JSON.stringify(dirs));
       })
-      .catch((e) => setError(`Could not reach your Plex server at ${p.url}. ${e}`));
+      .catch((e) => setError(`Could not reach your Plex server at ${p.url}. Showing what was saved last time. ${e}`));
   }, [p?.url, p?.token]);
 
   useEffect(() => {
     if (!source) return;
     setShow(null);
     setQuery("");
-    setLoading(true);
-    const done = () => setLoading(false);
     if (source.kind === "plex" && p) {
-      plex
-        .get(p, `/library/sections/${source.key}/all`)
-        .then((mc) => setItems(mc.Metadata || []))
-        .catch((e) => setError(String(e)))
-        .finally(done);
+      setItems([]);
+      cached(`plex:${p.url}:section:${source.key}`, () => plex.get(p, `/library/sections/${source.key}/all`).then((mc) => slim(mc.Metadata)), setItems);
     } else if (source.kind === "folder") {
-      api
-        .scanFolder(source.path)
-        .then(setFiles)
-        .catch((e) => setError(String(e)))
-        .finally(done);
+      setFiles([]);
+      cached(`folder:${source.path}`, () => api.scanFolder(source.path), setFiles);
     }
   }, [source]);
 
   useEffect(() => {
     if (!show || !p) return;
-    setLoading(true);
-    plex
-      .get(p, `/library/metadata/${show.ratingKey}/allLeaves`)
-      .then((mc) => setEpisodes(mc.Metadata || []))
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+    setEpisodes([]);
+    cached(`plex:${p.url}:show:${show.ratingKey}`, () => plex.get(p, `/library/metadata/${show.ratingKey}/allLeaves`).then((mc) => slim(mc.Metadata)), setEpisodes);
   }, [show]);
 
   // Difficulty badges for whatever is on screen.
@@ -152,7 +191,7 @@ export default function Library() {
   const playFile = (path: string) =>
     api
       .probeFile(path)
-      .then(play)
+      .then((req) => play({ ...req, group: "folder-" + path.replace(/[\\/][^\\/]*$/, "") }))
       .catch((e) => toast(String(e)));
 
   const playPlex = (ratingKey: string) =>
@@ -209,19 +248,51 @@ export default function Library() {
   return (
     <div className="library">
       <aside className="side">
-        <h3>Plex</h3>
+        <div className="side-head">
+          <h3>Plex</h3>
+          {p && sections.length > 0 && (
+            <button className="ghost small" onClick={() => setManaging(!managing)} title="Choose which libraries to show">
+              {managing ? "Done" : "Edit"}
+            </button>
+          )}
+        </div>
         {p ? (
           <>
-            {sections.map((s) => (
-              <button
-                key={s.key}
-                className={source?.kind === "plex" && source.key === s.key ? "side-item active" : "side-item"}
-                onClick={() => setSource({ kind: "plex", key: s.key, title: s.title, type: s.type })}
-              >
-                <Icon name={s.type === "show" ? "tv" : "film"} size={17} />
-                <span>{s.title}</span>
-              </button>
-            ))}
+            {sections
+              .filter((s) => managing || !hidden.includes(s.key))
+              .map((s) => {
+                const isHidden = hidden.includes(s.key);
+                return (
+                  <div key={s.key} className="side-row">
+                    <button
+                      className={
+                        (source?.kind === "plex" && source.key === s.key ? "side-item active" : "side-item") + (isHidden ? " dimmed" : "")
+                      }
+                      onClick={() => !isHidden && setSource({ kind: "plex", key: s.key, title: s.title, type: s.type })}
+                    >
+                      <Icon name={s.type === "show" ? "tv" : "film"} size={17} />
+                      <span>{s.title}</span>
+                    </button>
+                    {managing && (
+                      <button
+                        className="icon-btn small"
+                        title={isHidden ? "Show this library" : "Hide this library"}
+                        onClick={() => {
+                          const next = isHidden ? hidden.filter((k) => k !== s.key) : [...hidden, s.key];
+                          save({ hiddenLibraries: next });
+                          if (!isHidden && source?.kind === "plex" && source.key === s.key) {
+                            const other = sections.find((x) => !next.includes(x.key));
+                            setSource(other ? { kind: "plex", key: other.key, title: other.title, type: other.type } : null);
+                          }
+                        }}
+                      >
+                        <Icon name={isHidden ? "eye-off" : "eye"} size={16} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            {!managing && hidden.length > 0 && <div className="muted small-text side-note">{hidden.length} hidden</div>}
             <div className="server-chip">
               <i /> {p.name}
             </div>

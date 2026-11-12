@@ -12,6 +12,9 @@ pub struct Tok {
     pub w: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub lemma: Option<String>,
+    /// Reading in hiragana (Japanese).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub r: Option<String>,
     /// Verb tense code ("pres", "pc", "imp", ...), for tense colouring.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub g: Option<String>,
@@ -104,10 +107,69 @@ fn is_word_char(c: char) -> bool {
 const FR_ELIDE: &[&str] = &[
     "l", "d", "j", "n", "m", "t", "s", "c", "qu", "jusqu", "lorsqu", "puisqu", "quoiqu",
 ];
+const IT_ELIDE: &[&str] = &[
+    "l", "un", "d", "c", "m", "t", "s", "v", "n", "dell", "nell", "all", "sull", "dall", "quell", "bell", "quest", "com", "dov",
+];
+
+fn elisions(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "fr" => FR_ELIDE,
+        "it" => IT_ELIDE,
+        _ => &[],
+    }
+}
+
+fn ja_segmenter() -> &'static lindera::segmenter::Segmenter {
+    static SEG: OnceLock<lindera::segmenter::Segmenter> = OnceLock::new();
+    SEG.get_or_init(|| {
+        let dictionary = lindera::dictionary::load_dictionary("embedded://ipadic").expect("embedded Japanese dictionary");
+        lindera::segmenter::Segmenter::new(lindera::mode::Mode::Normal, dictionary, None)
+    })
+}
+
+fn katakana_to_hiragana(s: &str) -> String {
+    s.chars()
+        .map(|c| if ('\u{30A1}'..='\u{30F6}').contains(&c) { char::from_u32(c as u32 - 0x60).unwrap_or(c) } else { c })
+        .collect()
+}
+
+/// Japanese has no spaces: a morphological analyser finds the words, their dictionary
+/// form and how they are read.
+fn tokenize_ja(text: &str) -> Vec<Tok> {
+    let Ok(mut tokens) = ja_segmenter().segment(std::borrow::Cow::Borrowed(text)) else {
+        return vec![Tok { t: text.to_string(), ..Default::default() }];
+    };
+    let mut out = vec![];
+    for token in tokens.iter_mut() {
+        let surface = token.surface.as_ref().to_string();
+        let details: Vec<String> = token.details().iter().map(|d| d.to_string()).collect();
+        let symbol = details.first().map(|pos| pos == "記号").unwrap_or(false);
+        let is_word = !symbol && surface.chars().any(|c| c.is_alphanumeric());
+        let field = |i: usize| details.get(i).filter(|v| v.as_str() != "*" && !v.is_empty()).cloned();
+        out.push(Tok {
+            w: is_word,
+            lemma: if is_word { Some(field(6).unwrap_or_else(|| surface.clone())) } else { None },
+            r: if !is_word {
+                None
+            } else if details.first().map(|pos| pos == "助詞").unwrap_or(false) && matches!(surface.as_str(), "は" | "へ") {
+                // As particles these are pronounced "wa" and "e".
+                Some(if surface == "は" { "わ" } else { "え" }.to_string())
+            } else {
+                field(7).map(|k| katakana_to_hiragana(&k))
+            },
+            t: surface,
+            ..Default::default()
+        });
+    }
+    out
+}
 
 /// Split a line into word and non-word tokens. Words keep inner apostrophes and hyphens
 /// only when the dictionary knows the whole thing ("aujourd'hui", "peut-être").
 pub fn tokenize(lang: &str, text: &str, dict: Option<&mut Dict>) -> Vec<Tok> {
+    if lang == "ja" {
+        return tokenize_ja(text);
+    }
     let chars: Vec<char> = text.chars().collect();
     let mut chunks: Vec<(String, bool)> = vec![];
     let mut i = 0;
@@ -162,10 +224,10 @@ pub fn tokenize(lang: &str, text: &str, dict: Option<&mut Dict>) -> Vec<Tok> {
         }
         // Elision: l'homme -> l' + homme
         let mut rest = chunk.as_str();
-        if lang == "fr" {
+        if !elisions(lang).is_empty() {
             if let Some(pos) = rest.find(['\'', '\u{2019}']) {
                 let prefix = norm(&rest[..pos]);
-                if FR_ELIDE.contains(&prefix.as_str()) {
+                if elisions(lang).contains(&prefix.as_str()) {
                     let cut = pos + rest[pos..].chars().next().unwrap().len_utf8();
                     push(&mut out, &rest[..cut], true);
                     rest = &rest[cut..];
@@ -193,8 +255,8 @@ pub fn tokenize(lang: &str, text: &str, dict: Option<&mut Dict>) -> Vec<Tok> {
         for t in out.iter_mut().filter(|t| t.w) {
             t.lemma = d.lemma(&t.t);
         }
-        if lang == "fr" {
-            tag_tenses(&mut out, d);
+        if let Some(rules) = tense_rules(lang) {
+            tag_tenses(&mut out, d, rules);
         }
     }
     out
@@ -202,7 +264,18 @@ pub fn tokenize(lang: &str, text: &str, dict: Option<&mut Dict>) -> Vec<Tok> {
 
 /// Work out each verb's tense, joining auxiliaries with their participle
 /// ("a mangé" is passé composé, "va manger" is futur proche).
-fn tag_tenses(toks: &mut [Tok], d: &Dict) {
+/// Per-language grammar for compound tenses: (auxiliaries, verb that forms the near future).
+fn tense_rules(lang: &str) -> Option<(&'static [&'static str], &'static str)> {
+    Some(match lang {
+        "fr" => (&["avoir", "être"], "aller"),
+        "es" => (&["haber"], "ir"),
+        "it" => (&["avere", "essere"], ""),
+        "pt" => (&["ter", "haver"], "ir"),
+        _ => return None,
+    })
+}
+
+fn tag_tenses(toks: &mut [Tok], d: &Dict, (auxiliaries, near_future): (&[&str], &str)) {
     const PRIORITY: &[&str] = &["pres", "imp", "fut", "cond", "pp", "subj", "imper", "ps", "ppr", "inf"];
     let words: Vec<usize> = (0..toks.len()).filter(|&i| toks[i].w).collect();
     let cands: Vec<Vec<&'static str>> = words
@@ -217,7 +290,7 @@ fn tag_tenses(toks: &mut [Tok], d: &Dict) {
         if cands[k].contains(&"pp") {
             for back in 1..=3.min(k) {
                 let a = k - back;
-                if !matches!(lemma(a), "avoir" | "être") {
+                if !auxiliaries.contains(&lemma(a)) {
                     continue;
                 }
                 let compound = if cands[a].contains(&"pres") {
@@ -238,7 +311,7 @@ fn tag_tenses(toks: &mut [Tok], d: &Dict) {
         if cands[k].contains(&"inf") && tags[k] == Some("inf") {
             for back in 1..=2.min(k) {
                 let a = k - back;
-                if lemma(a) == "aller" && cands[a].contains(&"pres") {
+                if !near_future.is_empty() && lemma(a) == near_future && cands[a].contains(&"pres") {
                     tags[a] = Some("fp");
                     tags[k] = Some("fp");
                     break;
@@ -324,6 +397,21 @@ mod tests {
         assert_eq!(words("Qu’est-ce que c’est"), ["Qu’", "est", "ce", "que", "c’", "est"]);
         let all: String = tokenize("fr", "Qu’est-ce que c’est ?", None).into_iter().map(|t| t.t).collect();
         assert_eq!(all, "Qu’est-ce que c’est ?");
+    }
+
+    #[test]
+    fn japanese_is_split_into_words_with_readings() {
+        let toks = tokenize("ja", "昨日は友達と映画を見に行きました。", None);
+        let words: Vec<(&str, &str, &str)> = toks
+            .iter()
+            .filter(|t| t.w)
+            .map(|t| (t.t.as_str(), t.lemma.as_deref().unwrap_or(""), t.r.as_deref().unwrap_or("")))
+            .collect();
+        assert!(words.contains(&("映画", "映画", "えいが")));
+        assert!(words.contains(&("行き", "行く", "いき")));
+        assert!(toks.iter().any(|t| t.t == "。" && !t.w));
+        let joined: String = toks.iter().map(|t| t.t.as_str()).collect();
+        assert_eq!(joined, "昨日は友達と映画を見に行きました。");
     }
 
     #[test]

@@ -73,7 +73,10 @@ def main():
     src = os.path.join(CACHE, f"{lang}.jsonl.gz")
     freq_src = os.path.join(CACHE, f"{lang}_50k.txt")
     fetch(f"https://kaikki.org/dictionary/{lang_name}/kaikki.org-dictionary-{lang_name}.jsonl.gz", src)
-    fetch(f"https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/{lang}/{lang}_50k.txt", freq_src)
+    try:
+        fetch(f"https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/{lang}/{lang}_50k.txt", freq_src)
+    except Exception as e:  # no frequency list for this language: ranks are simply absent
+        print("no frequency list:", e)
 
     out = os.path.join(CACHE, f"dict-{lang}.sqlite")
     if os.path.exists(out):
@@ -138,7 +141,7 @@ def main():
     db.executemany("INSERT INTO form VALUES(?,?,?)", forms)
 
     rank, seen = 0, set()
-    with open(freq_src, encoding="utf-8") as f:
+    with open(freq_src if os.path.exists(freq_src) else os.devnull, encoding="utf-8") as f:
         for line in f:
             w = norm(line.split(" ")[0])
             if w and w not in seen:

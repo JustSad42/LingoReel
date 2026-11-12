@@ -55,9 +55,21 @@ export default function App() {
   }, []);
 
   const lang = settings?.targetLang;
+  const firstLang = useRef(true);
   useEffect(() => {
     if (!lang) return;
     api.wordsAll(lang).then((rows) => setWordMap(new Map(rows)));
+    if (firstLang.current) {
+      firstLang.current = false;
+      return;
+    }
+    // Switched language: its dictionary may still need downloading.
+    api.components().then((comps) => {
+      if (comps.some((c) => c.required && !c.installed)) {
+        setView("setup");
+        toast("Download the dictionary for this language to start studying it.");
+      }
+    });
   }, [lang]);
 
   useEffect(() => {
