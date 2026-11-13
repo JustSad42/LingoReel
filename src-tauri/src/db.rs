@@ -19,7 +19,9 @@ pub fn open(dir: &Path) -> anyhow::Result<Connection> {
          CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, card_id INTEGER, ts INTEGER, rating INTEGER);
          CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, v TEXT, ts INTEGER);
          CREATE TABLE IF NOT EXISTS media(key TEXT PRIMARY KEY, title TEXT, position REAL, duration REAL,
-             updated INTEGER);",
+             updated INTEGER);
+         CREATE TABLE IF NOT EXISTS queue(key TEXT PRIMARY KEY, title TEXT, req TEXT, opts TEXT, state TEXT,
+             error TEXT, pos REAL, urgent INTEGER DEFAULT 0);",
     )?;
     Ok(db)
 }

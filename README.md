@@ -30,6 +30,8 @@ model. After that the app works offline and updates itself.
 - **Tense colours** – verbs are tinted by tense (passé composé, imparfait, futur, conditionnel, subjonctif and more); can be switched off.
 - **Easy lines** – finds every line with exactly one word you do not know and adds them to review in one click.
 - **Hear it elsewhere** – plays other scenes from your prepared videos where the same word is spoken.
+- **English films too** – for a video whose audio is English (or any language other than the one you study), you read its French subtitles with the English line underneath, each line timed to the speech. With no French subtitles, the local model translates the English ones.
+- **Background queue** – queue movies, episodes, seasons or whole series from the Library and they are prepared one after another while you do something else. Pausing frees the graphics card; the queue carries on after a restart.
 - **Next episode** – the following episode is prepared in the background while you watch, then offered when the credits start.
 - **Skip intro and credits** – uses the intro and credits markers from your Plex server when it has them.
 

@@ -6,6 +6,7 @@ mod dict;
 mod llm;
 mod media;
 mod mpv;
+mod queue;
 mod srs;
 mod subs;
 mod util;
@@ -28,6 +29,11 @@ pub struct AppState {
     pub prepare_lock: tokio::sync::Mutex<()>,
     /// Limits concurrent scene-clip encodes.
     pub clip_slots: tokio::sync::Semaphore,
+    pub queue: queue::Queue,
+    /// Latest preparation progress: video key, stage, percent.
+    pub progress: Mutex<Option<(String, String, f64)>>,
+    /// Helper processes (FFmpeg, Whisper) to stop when the app closes.
+    pub children: Mutex<std::collections::HashSet<u32>>,
 }
 
 #[tauri::command]
@@ -62,7 +68,12 @@ pub fn run() {
                 llm: tokio::sync::Mutex::new(None),
                 prepare_lock: tokio::sync::Mutex::new(()),
                 clip_slots: tokio::sync::Semaphore::new(2),
+                queue: Default::default(),
+                progress: Mutex::new(None),
+                children: Mutex::new(Default::default()),
             });
+            queue::init(&app.state::<AppState>());
+            tauri::async_runtime::spawn(queue::run(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -105,6 +116,12 @@ pub fn run() {
             llm::llm_stop,
             llm::shadow_score,
             llm::http_json,
+            queue::queue_add,
+            queue::queue_list,
+            queue::queue_remove,
+            queue::queue_retry,
+            queue::queue_clear,
+            queue::queue_pause,
         ])
         .build(tauri::generate_context!())
         .expect("error while building LingoReel");
@@ -117,6 +134,17 @@ pub fn run() {
                 if let Some(m) = g.as_mut() {
                     m.kill();
                 }
+            }
+            queue::stop(&state);
+            for pid in state.children.lock().unwrap().drain() {
+                let mut c = std::process::Command::new("taskkill");
+                c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    c.creation_flags(0x0800_0000);
+                }
+                let _ = c.status();
             }
             if let Ok(mut g) = state.llm.try_lock() {
                 if let Some(s) = g.as_mut() {

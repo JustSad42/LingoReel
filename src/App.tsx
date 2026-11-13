@@ -8,6 +8,8 @@ import Player from "./views/Player";
 import Review from "./views/Review";
 import Words from "./views/Words";
 import SettingsView from "./views/SettingsView";
+import QueueView from "./views/Queue";
+import { useQueue } from "./queue";
 import Icon from "./Icon";
 import Backdrop from "./Backdrop";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -28,7 +30,7 @@ type Ctx = {
 const AppCtx = createContext<Ctx>(null as unknown as Ctx);
 export const useApp = () => useContext(AppCtx);
 
-type View = "library" | "review" | "words" | "setup" | "settings";
+type View = "library" | "queue" | "review" | "words" | "setup" | "settings";
 
 export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -39,6 +41,9 @@ export default function App() {
   const [update, setUpdate] = useState<Update | null>(null);
   const [updating, setUpdating] = useState(false);
   const [dueCount, setDueCount] = useState(0);
+  const queue = useQueue();
+  const pending = queue.items.filter((i) => i.state !== "failed").length;
+  const busy = queue.items.some((i) => i.state === "working");
   const toastTimer = useRef<number>();
 
   useEffect(() => {
@@ -157,6 +162,7 @@ export default function App() {
 
   const tabs: [View, string, string][] = [
     ["library", "Library", "library"],
+    ["queue", "Queue", "queue"],
     ["review", "Review", "review"],
     ["words", "Words", "words"],
     ["setup", "Setup", "download"],
@@ -176,6 +182,11 @@ export default function App() {
                 <Icon name={icon} size={21} />
                 <span>{label}</span>
                 {id === "review" && dueCount > 0 && <em className="badge">{dueCount}</em>}
+                {id === "queue" && pending > 0 && (
+                  <em className={"badge" + (busy ? " busy" : "")} title={busy ? "Preparing in the background" : undefined}>
+                    {pending}
+                  </em>
+                )}
               </button>
             ))}
             <div className="spacer" />
@@ -193,6 +204,7 @@ export default function App() {
             </div>
             {view !== "library" && !playing && (
               <div className="view enter" key={view}>
+                {view === "queue" && <QueueView />}
                 {view === "review" && <Review />}
                 {view === "words" && <Words />}
                 {view === "setup" && <Setup onDone={() => setView("library")} />}

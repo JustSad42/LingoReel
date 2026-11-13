@@ -3,6 +3,7 @@
 use crate::align::{self, Heard};
 use crate::components;
 use crate::dict;
+use crate::llm;
 use crate::subs::{self, Cue};
 use crate::util::{cmd, decode_text, lang2, Res};
 use crate::AppState;
@@ -12,7 +13,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const TEXT_CODECS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "tx3g", "webvtt", "vtt", "text"];
@@ -61,11 +62,11 @@ pub struct MediaReq {
     pub audio: Vec<AudioTrack>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PrepareOpts {
     pub target_lang: String,
     pub native_lang: String,
-    /// "auto", "whisper" (transcribe the audio) or a track id.
+    /// "auto", "whisper" (transcribe the audio), "translate" (from the spoken language) or a track id.
     pub target_sub: String,
     /// "auto", "none" or a track id.
     pub native_sub: String,
@@ -82,6 +83,12 @@ pub struct Prepared {
     #[serde(default)]
     pub url: String,
     pub lang: String,
+    /// Language of the audio. Differs from `lang` for, say, an English film with French subtitles.
+    #[serde(default)]
+    pub spoken: String,
+    /// The learned-language lines were machine-translated.
+    #[serde(default)]
+    pub translated: bool,
     pub cues: Vec<Cue>,
     /// True when word timings come from the audio rather than being estimated.
     pub aligned: bool,
@@ -151,6 +158,9 @@ fn variant_score(lang: &str, tag: &str, title: &str) -> i32 {
 }
 
 fn emit(app: &AppHandle, key: &str, stage: &str, pct: f64, note: &str) {
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.progress.lock().unwrap() = Some((key.to_string(), stage.to_string(), pct));
+    }
     let _ = app.emit("prepare-progress", json!({"key": key, "stage": stage, "pct": pct, "note": note}));
 }
 
@@ -200,6 +210,8 @@ pub async fn whisper_words(
         .stderr(Stdio::piped())
         .spawn()
         .context("starting whisper")?;
+    let pid = child.id();
+    track(state, pid, true);
     let stderr = child.stderr.take().unwrap();
     let mut lines = BufReader::new(stderr).lines();
     let mut tail: Vec<String> = vec![];
@@ -216,6 +228,7 @@ pub async fn whisper_words(
         }
     }
     let status = child.wait().await?;
+    track(state, pid, false);
     let json_path = PathBuf::from(format!("{}.json", out_base.display()));
     if !status.success() || !json_path.exists() {
         bail!("speech recognition failed: {}", tail.join(" | "));
@@ -280,6 +293,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subtitles_follow_the_retimed_reference() {
+        let cue = |s: f64, e: f64| Cue { start: s, end: e, text: "x".into(), ..Default::default() };
+        let before = vec![cue(10.0, 12.0), cue(20.0, 22.0)];
+        let after = vec![cue(8.5, 10.4), cue(19.0, 21.0)];
+        let mut french = vec![cue(10.2, 12.1), cue(19.8, 22.3)];
+        follow_timing(&mut french, &before, &after);
+        assert!((french[0].start - 8.7).abs() < 1e-9 && (french[0].end - 10.6).abs() < 1e-9);
+        assert!((french[1].start - 18.8).abs() < 1e-9);
+    }
+
+    #[test]
     fn whisper_json_becomes_timed_words() {
         let v = json!({"transcription": [{
             "text": " Où est l'élève ?",
@@ -306,96 +330,180 @@ mod tests {
 }
 
 
-async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &PrepareOpts) -> anyhow::Result<Prepared> {
-    let key = req.key.as_str();
-    let tmp = state.dir.join("tmp").join(format!("prep-{}", std::process::id()));
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-    tokio::fs::create_dir_all(&tmp).await?;
+/// Tokenise every cue (with the dictionary, when it is installed).
+fn tokenise(state: &AppState, lang: &str, cues: &mut [Cue]) -> anyhow::Result<()> {
+    if components::locate(state, &format!("dict-{lang}")).is_some() {
+        dict::with_dict(state, lang, |d| {
+            for c in cues.iter_mut() {
+                c.tokens = subs::tokenize(lang, &c.text, Some(d));
+            }
+        })?;
+    } else {
+        for c in cues.iter_mut() {
+            c.tokens = subs::tokenize(lang, &c.text, None);
+        }
+    }
+    Ok(())
+}
 
+/// Move cues the way the reference cues they overlap moved when those were lined up with
+/// the speech. `before` and `after` are the same reference cues before and after alignment.
+fn follow_timing(cues: &mut [Cue], before: &[Cue], after: &[Cue]) {
+    if before.is_empty() || before.len() != after.len() {
+        return;
+    }
+    let mut from = 0usize;
+    for c in cues.iter_mut() {
+        while from + 1 < before.len() && before[from].end < c.start - 10.0 {
+            from += 1;
+        }
+        let mut best: Option<(usize, f64)> = None;
+        let mut k = from;
+        while k < before.len() && before[k].start < c.end + 10.0 {
+            let overlap = c.end.min(before[k].end) - c.start.max(before[k].start);
+            if best.map(|(_, o)| overlap > o).unwrap_or(true) {
+                best = Some((k, overlap));
+            }
+            k += 1;
+        }
+        let k = best.map(|(k, _)| k).unwrap_or(from);
+        let shift = after[k].start - before[k].start;
+        c.start = (c.start + shift).max(0.0);
+        c.end = (c.end + shift).max(c.start + 0.2);
+    }
+    for k in 1..cues.len() {
+        if cues[k - 1].end > cues[k].start {
+            cues[k - 1].end = cues[k].start.max(cues[k - 1].start + 0.05);
+        }
+    }
+}
+
+/// Pull embedded subtitle tracks and (optionally) the audio out of the file in one FFmpeg pass.
+async fn extract(
+    app: &AppHandle,
+    state: &AppState,
+    req: &MediaReq,
+    subs_out: &[(i64, &Path)],
+    audio_out: Option<(String, &Path)>,
+) -> anyhow::Result<()> {
+    if subs_out.is_empty() && audio_out.is_none() {
+        return Ok(());
+    }
+    let key = req.key.as_str();
+    let ffmpeg = components::require(state, "ffmpeg")?;
+    let mut c = cmd(&ffmpeg);
+    c.args(["-y", "-v", "error", "-nostdin", "-progress", "pipe:1", "-i"]).arg(&req.url);
+    for (i, path) in subs_out {
+        c.args(["-map", &format!("0:{i}"), "-c:s", "srt"]).arg(path);
+    }
+    if let Some((map, wav)) = &audio_out {
+        c.args(["-map", map, "-vn", "-sn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"]).arg(wav);
+    }
+    emit(app, key, "extract", 0.0, "Reading subtitles and audio from the file");
+    let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("starting ffmpeg")?;
+    let pid = child.id();
+    track(state, pid, true);
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut stderr = child.stderr.take().unwrap();
+    let err_task = tokio::spawn(async move {
+        let mut s = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut s).await;
+        s
+    });
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
+            if req.duration > 0.0 {
+                let pct = (us / 1e6 / req.duration * 100.0).clamp(0.0, 100.0);
+                emit(app, key, "extract", pct, "Reading subtitles and audio from the file");
+            }
+        }
+    }
+    let status = child.wait().await?;
+    track(state, pid, false);
+    let err = err_task.await.unwrap_or_default();
+    if !status.success() {
+        bail!("FFmpeg could not read the video: {}", err.lines().last().unwrap_or("unknown error"));
+    }
+    Ok(())
+}
+
+/// Remember (or forget) a helper process so it can be stopped when the app closes.
+pub fn track(state: &AppState, pid: Option<u32>, add: bool) {
+    if let Some(pid) = pid {
+        let mut set = state.children.lock().unwrap();
+        if add {
+            set.insert(pid);
+        } else {
+            set.remove(&pid);
+        }
+    }
+}
+
+async fn read_track(state: &AppState, track: Option<&SubTrack>, embedded: &Path, tmp: &Path) -> anyhow::Result<Vec<Cue>> {
+    match track {
+        None => Ok(vec![]),
+        Some(t) if t.index.is_some() => Ok(subs::parse_srt(&decode_text(&tokio::fs::read(embedded).await?))),
+        Some(t) => read_external(state, t, tmp).await,
+    }
+}
+
+/// Prepare one video. Called by the background queue, one video at a time.
+pub async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &PrepareOpts) -> anyhow::Result<Prepared> {
+    let key = req.key.as_str();
+    let tmp = state.dir.join("tmp").join(format!("prep-{}", uuid::Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&tmp).await?;
+    let result = prepare_in(app, state, req, opts, &tmp).await;
+    let _ = tokio::fs::remove_dir_all(&tmp).await;
+    let prepared = result?;
+    let path = prepared_path(state, key);
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&path, serde_json::to_vec(&prepared)?).await?;
+    emit(app, key, "done", 100.0, "");
+    Ok(prepared)
+}
+
+async fn prepare_in(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &PrepareOpts, tmp: &Path) -> anyhow::Result<Prepared> {
+    let key = req.key.as_str();
     let can_listen = components::locate(state, "whisper").is_some()
         && components::locate(state, "whisper-model").is_some();
-    let target = if opts.target_sub == "whisper" { None } else { pick_sub(&req.subs, &opts.target_lang, &opts.target_sub) };
-    let native = if opts.native_sub == "none" { None } else { pick_sub(&req.subs, &opts.native_lang, &opts.native_sub) };
-    if target.is_none() && !can_listen {
-        bail!(
-            "This video has no {} text subtitles. Install the speech recognition components in Setup to transcribe the audio instead.",
-            opts.target_lang
-        );
-    }
-    let listen = can_listen && (opts.align || target.is_none());
     let audio = req
         .audio
         .iter()
         .filter(|a| lang2(&a.lang) == opts.target_lang)
         .max_by_key(|a| variant_score(&opts.target_lang, &a.lang, &a.title))
         .or_else(|| req.audio.first());
-    let mut note = String::new();
-    if let Some(a) = audio {
-        let l = lang2(&a.lang);
-        if !l.is_empty() && l != "und" && l != opts.target_lang {
-            note = format!("No {} audio track found; the spoken language is '{}'.", opts.target_lang, a.lang);
-        }
+    // The language actually spoken. Unlabelled audio is assumed to be the one being learned.
+    let spoken = audio
+        .map(|a| lang2(&a.lang))
+        .filter(|l| !l.is_empty() && !matches!(l.as_str(), "und" | "zxx" | "mul" | "mis"))
+        .unwrap_or_else(|| opts.target_lang.clone());
+    if spoken != opts.target_lang {
+        return prepare_foreign(app, state, req, opts, tmp, audio, &spoken, can_listen).await;
     }
 
-    // One FFmpeg pass pulls embedded subtitles and the audio out of the file.
-    let ffmpeg = components::require(state, "ffmpeg")?;
+    let target = if opts.target_sub == "whisper" { None } else { pick_sub(&req.subs, &opts.target_lang, &opts.target_sub) };
+    let native = if opts.native_sub == "none" { None } else { pick_sub(&req.subs, &opts.native_lang, &opts.native_sub) };
+    if target.is_none() && !can_listen {
+        bail!(
+            "This video has no {} text subtitles. Install the speech recognition components in Setup to transcribe the audio instead.",
+            llm::lang_name(&opts.target_lang)
+        );
+    }
+    let listen = can_listen && (opts.align || target.is_none());
+
     let (t_srt, n_srt, wav) = (tmp.join("target.srt"), tmp.join("native.srt"), tmp.join("audio.wav"));
-    let mut c = cmd(&ffmpeg);
-    c.args(["-y", "-v", "error", "-nostdin", "-progress", "pipe:1", "-i"]).arg(&req.url);
-    let mut outputs = 0;
+    let mut subs_out: Vec<(i64, &Path)> = vec![];
     if let Some(i) = target.and_then(|t| t.index) {
-        c.args(["-map", &format!("0:{i}"), "-c:s", "srt"]).arg(&t_srt);
-        outputs += 1;
+        subs_out.push((i, &t_srt));
     }
     if let Some(i) = native.and_then(|t| t.index) {
-        c.args(["-map", &format!("0:{i}"), "-c:s", "srt"]).arg(&n_srt);
-        outputs += 1;
+        subs_out.push((i, &n_srt));
     }
-    if listen {
-        let map = audio.map(|a| format!("0:{}", a.index)).unwrap_or_else(|| "0:a:0".into());
-        c.args(["-map", &map, "-vn", "-sn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"]).arg(&wav);
-        outputs += 1;
-    }
-    if outputs > 0 {
-        emit(app, key, "extract", 0.0, "Reading subtitles and audio from the file");
-        let mut child = c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("starting ffmpeg")?;
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let mut stderr = child.stderr.take().unwrap();
-        let err_task = tokio::spawn(async move {
-            let mut s = String::new();
-            let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut s).await;
-            s
-        });
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
-                if req.duration > 0.0 {
-                    let pct = (us / 1e6 / req.duration * 100.0).clamp(0.0, 100.0);
-                    emit(app, key, "extract", pct, "Reading subtitles and audio from the file");
-                }
-            }
-        }
-        let status = child.wait().await?;
-        let err = err_task.await.unwrap_or_default();
-        if !status.success() {
-            bail!("FFmpeg could not read the video: {}", err.lines().last().unwrap_or("unknown error"));
-        }
-    }
+    let map = audio.map(|a| format!("0:{}", a.index)).unwrap_or_else(|| "0:a:0".into());
+    extract(app, state, req, &subs_out, listen.then(|| (map, wav.as_path()))).await?;
 
-    let read_track = |track: Option<&SubTrack>, embedded: PathBuf| {
-        let track = track.cloned();
-        let tmp = tmp.clone();
-        async move {
-            match track {
-                None => Ok::<Vec<Cue>, anyhow::Error>(vec![]),
-                Some(t) if t.index.is_some() => {
-                    Ok(subs::parse_srt(&decode_text(&tokio::fs::read(&embedded).await?)))
-                }
-                Some(t) => read_external(state, &t, &tmp).await,
-            }
-        }
-    };
-    let mut cues = read_track(target, t_srt).await.context("reading target-language subtitles")?;
-    let native_cues = read_track(native, n_srt).await.unwrap_or_default();
+    let mut cues = read_track(state, target, &t_srt, tmp).await.context("reading target-language subtitles")?;
+    let native_cues = read_track(state, native, &n_srt, tmp).await.unwrap_or_default();
 
     let mut heard: Vec<Heard> = vec![];
     if listen {
@@ -418,35 +526,19 @@ async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Prepa
         target_source = "speech";
     }
     let lang = opts.target_lang.clone();
-    let has_dict = components::locate(state, &format!("dict-{lang}")).is_some();
     let mut prepared = Prepared {
         version: PREPARED_VERSION,
         key: key.to_string(),
         title: req.title.clone(),
         url: req.url.clone(),
         lang: lang.clone(),
+        spoken: spoken.clone(),
         target_source: target_source.into(),
         native_source: if native_cues.is_empty() { "none".into() } else { "subtitles".into() },
         audio_index: audio.map(|a| a.index),
-        note,
         ..Default::default()
     };
-    // Tokenising and aligning are CPU work on a few thousand lines; do them off the async runtime.
-    let tokenise = |cues: &mut Vec<Cue>| -> anyhow::Result<()> {
-        if has_dict {
-            dict::with_dict(state, &lang, |d| {
-                for c in cues.iter_mut() {
-                    c.tokens = subs::tokenize(&lang, &c.text, Some(d));
-                }
-            })?;
-        } else {
-            for c in cues.iter_mut() {
-                c.tokens = subs::tokenize(&lang, &c.text, None);
-            }
-        }
-        Ok(())
-    };
-    tokenise(&mut cues)?;
+    tokenise(state, &lang, &mut cues)?;
     if heard.is_empty() {
         cues.iter_mut().for_each(subs::spread_tokens);
     } else {
@@ -454,14 +546,13 @@ async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Prepa
         let stats = align::align(&mut cues, &heard);
         let rate = stats.matched as f64 / stats.total.max(1) as f64;
         if rate < 0.3 && target_source != "speech" {
-            // The audio does not say what the subtitles say (different language or a dub
-            // with its own script). Keep the file's own timing.
+            // The audio does not say what the subtitles say (a dub with its own script).
+            // Keep the file's own timing.
             cues = original;
             cues.iter_mut().for_each(subs::spread_tokens);
             prepared.note = format!(
-                "Only {:.0}% of subtitle words were heard in the audio, so word timing is estimated. {}",
-                rate * 100.0,
-                prepared.note
+                "Only {:.0}% of subtitle words were heard in the audio, so word timing is estimated.",
+                rate * 100.0
             );
         } else {
             prepared.aligned = true;
@@ -470,18 +561,152 @@ async fn prepare(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Prepa
     }
     subs::pair_native(&mut cues, &native_cues);
     prepared.cues = cues;
-
-    let path = prepared_path(state, key);
-    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    tokio::fs::write(&path, serde_json::to_vec(&prepared)?).await?;
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-    emit(app, key, "done", 100.0, "");
     Ok(prepared)
+}
+
+/// The audio is in another language than the one being learned: an English film studied
+/// with French subtitles. Lines are timed to the speech through the English subtitles (or
+/// what Whisper hears), and French lines are translated by the local model when the video
+/// has none of its own.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_foreign(
+    app: &AppHandle,
+    state: &AppState,
+    req: &MediaReq,
+    opts: &PrepareOpts,
+    tmp: &Path,
+    audio: Option<&AudioTrack>,
+    spoken: &str,
+    can_listen: bool,
+) -> anyhow::Result<Prepared> {
+    let key = req.key.as_str();
+    let (target_name, spoken_name) = (llm::lang_name(&opts.target_lang), llm::lang_name(spoken));
+    let force_translate = matches!(opts.target_sub.as_str(), "translate" | "whisper");
+    let target = if force_translate { None } else { pick_sub(&req.subs, &opts.target_lang, &opts.target_sub) };
+    let native = if opts.native_sub == "none" { None } else { pick_sub(&req.subs, &opts.native_lang, &opts.native_sub) };
+    // Lines in the spoken language: the source for timing, and for translation.
+    let source = native.or_else(|| pick_sub(&req.subs, spoken, "auto"));
+    if target.is_none() {
+        if !llm::available(state) {
+            bail!(
+                "The audio is {spoken_name} and the video has no {target_name} subtitles. Install the local language model in Setup \
+                 so LingoReel can translate the {spoken_name} subtitles, or add a {target_name} subtitle file to the video."
+            );
+        }
+        if source.is_none() && !can_listen {
+            bail!(
+                "The video has neither {target_name} nor {spoken_name} subtitles. Install speech recognition in Setup so LingoReel \
+                 can write the {spoken_name} lines from the audio and translate them."
+            );
+        }
+    }
+    let listen = can_listen && (source.is_none() || opts.align);
+
+    let (t_srt, s_srt, wav) = (tmp.join("target.srt"), tmp.join("source.srt"), tmp.join("audio.wav"));
+    let mut subs_out: Vec<(i64, &Path)> = vec![];
+    if let Some(i) = target.and_then(|t| t.index) {
+        subs_out.push((i, &t_srt));
+    }
+    if let Some(i) = source.and_then(|t| t.index) {
+        subs_out.push((i, &s_srt));
+    }
+    let map = audio.map(|a| format!("0:{}", a.index)).unwrap_or_else(|| "0:a:0".into());
+    extract(app, state, req, &subs_out, listen.then(|| (map, wav.as_path()))).await?;
+
+    let mut cues = read_track(state, target, &t_srt, tmp).await.context("reading target-language subtitles")?;
+    let mut reference = read_track(state, source, &s_srt, tmp).await.unwrap_or_default();
+
+    let mut heard: Vec<Heard> = vec![];
+    if listen {
+        emit(app, key, "listen", 0.0, "Listening to the audio");
+        let app2 = app.clone();
+        let key2 = key.to_string();
+        heard = whisper_words(state, &wav, spoken, &tmp.join("whisper"), move |p| {
+            emit(&app2, &key2, "listen", p, "Listening to the audio")
+        })
+        .await?;
+    }
+
+    emit(app, key, "align", 0.0, "Lining the subtitles up with the speech");
+    let mut note = format!("{spoken_name} audio: each line is timed to the speech; words are not highlighted one by one.");
+    let mut offset = 0.0;
+    let mut reference_source = "subtitles";
+    if reference.is_empty() {
+        if heard.is_empty() && cues.is_empty() {
+            bail!("No subtitles could be read and no speech was recognised.");
+        }
+        if !heard.is_empty() {
+            reference = align::cues_from_heard(&heard, !matches!(spoken, "ja" | "zh"));
+            reference_source = "speech";
+        }
+    } else if !heard.is_empty() {
+        for c in reference.iter_mut() {
+            c.tokens = subs::tokenize(spoken, &c.text, None);
+        }
+        let before = reference.clone();
+        let stats = align::align(&mut reference, &heard);
+        if stats.matched as f64 / stats.total.max(1) as f64 >= 0.3 {
+            offset = stats.offset;
+            // Subtitles in the learned language move with the ones that match the audio.
+            follow_timing(&mut cues, &before, &reference);
+        } else {
+            reference = before;
+        }
+    }
+
+    let mut translated = false;
+    let mut target_source = target.map(|t| if t.index.is_some() { "embedded" } else { "external" }).unwrap_or("translated");
+    if cues.is_empty() {
+        if reference.is_empty() {
+            bail!("There are no {spoken_name} lines to translate.");
+        }
+        let lines: Vec<String> = reference.iter().map(|c| c.text.clone()).collect();
+        let message = format!("Translating the {spoken_name} lines into {target_name}");
+        emit(app, key, "translate", 0.0, &message);
+        let app2 = app.clone();
+        let key2 = key.to_string();
+        let out = llm::translate_lines(state, spoken, &opts.target_lang, &lines, move |p| {
+            emit(&app2, &key2, "translate", p, &message)
+        })
+        .await?;
+        cues = reference
+            .iter()
+            .zip(out)
+            .filter(|(_, t)| !t.trim().is_empty())
+            .map(|(c, t)| Cue { start: c.start, end: c.end, text: t.trim().to_string(), ..Default::default() })
+            .collect();
+        translated = true;
+        target_source = "translated";
+        note.push_str(&format!(
+            " The {target_name} lines were translated from the {spoken_name} by the local model and can contain mistakes."
+        ));
+    }
+
+    tokenise(state, &opts.target_lang, &mut cues)?;
+    cues.iter_mut().for_each(subs::spread_tokens);
+    // The second line shows the spoken language when that is the learner's own language.
+    let native_lines: &[Cue] = if spoken == opts.native_lang || native.is_some() { &reference } else { &[] };
+    subs::pair_native(&mut cues, native_lines);
+    Ok(Prepared {
+        version: PREPARED_VERSION,
+        key: key.to_string(),
+        title: req.title.clone(),
+        url: req.url.clone(),
+        lang: opts.target_lang.clone(),
+        spoken: spoken.to_string(),
+        translated,
+        cues,
+        aligned: false,
+        target_source: target_source.into(),
+        native_source: if native_lines.is_empty() { "none".into() } else { reference_source.into() },
+        audio_index: audio.map(|a| a.index),
+        offset,
+        note,
+    })
 }
 
 #[tauri::command]
 pub async fn prepare_media(app: AppHandle, state: State<'_, AppState>, req: MediaReq, opts: PrepareOpts) -> Res<Prepared> {
-    // One at a time: Whisper wants the whole GPU.
     let _busy = state.prepare_lock.lock().await;
     Ok(prepare(&app, &state, &req, &opts).await?)
 }

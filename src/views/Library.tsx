@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, FileEntry, fmtTime, MediaStats, plex, PlexConn } from "../api";
+import { api, FileEntry, fmtTime, MediaReq, MediaStats, plex, PlexConn } from "../api";
+import { enqueue, overall, useQueue } from "../queue";
 import { useApp } from "../App";
 import Icon from "../Icon";
 
@@ -84,8 +84,8 @@ export default function Library({ active }: { active: boolean }) {
   const [summaries, setSummaries] = useState<Record<string, MediaStats>>({});
   const [progress, setProgress] = useState<Map<string, [number, number]>>(new Map());
   const [linking, setLinking] = useState(false);
-  const [batch, setBatch] = useState<{ key: string; label: string; pct: number } | null>(null);
-  const cancelBatch = useRef(false);
+  const queue = useQueue();
+  const queued = useMemo(() => new Map(queue.items.map((i) => [i.key, i])), [queue]);
 
   // Coming back from the player or another screen: pick up new watch progress and difficulty scores.
   useEffect(() => {
@@ -152,17 +152,69 @@ export default function Library({ active }: { active: boolean }) {
     if (visibleKeys.length) api.summaries(visibleKeys).then(setSummaries).catch(() => {});
   };
   useEffect(refreshSummaries, [visibleKeys]);
+  // Something left the queue (finished): show its difficulty.
+  const queuedKeys = queue.items.map((i) => i.key).join("|");
+  useEffect(refreshSummaries, [queuedKeys]);
 
-  useEffect(() => {
-    const un = listen<{ key: string; stage: string; pct: number }>("prepare-progress", (e) => {
-      const stageShare: Record<string, [number, number]> = { extract: [0, 25], listen: [25, 70], align: [95, 5], done: [100, 0] };
-      const [base, span] = stageShare[e.payload.stage] || [0, 0];
-      setBatch((b) => (b && b.key === e.payload.key ? { ...b, pct: base + (span * e.payload.pct) / 100 } : b));
-    });
-    return () => {
-      un.then((f) => f());
-    };
-  }, []);
+  /** Queue state when the video is waiting or being prepared, otherwise how hard it is. */
+  const badge = (key: string) => {
+    const q = queued.get(key);
+    if (!q) return <DifficultyBadge s={summaries[key]} />;
+    if (q.state === "working") return <span className="qstate working">Preparing {Math.round(overall(q.stage, q.pct))}%</span>;
+    if (q.state === "failed") return <span className="qstate failed" title={q.error}>Could not prepare</span>;
+    return <span className="qstate">In queue</span>;
+  };
+  const queueButton = (title: string, add: () => void) => (
+    <span
+      role="button"
+      className="queue-btn"
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        add();
+      }}
+    >
+      <Icon name="queue-add" size={16} />
+    </span>
+  );
+  const report = (added: number, asked: number) =>
+    toast(
+      added
+        ? `Added ${added === 1 ? "1 video" : added + " videos"} to the queue. They are prepared in the background.`
+        : asked
+          ? "Already prepared or already being prepared."
+          : "Nothing to add.",
+    );
+  const queuePlex = async (ratingKeys: string[]) => {
+    if (!p) return;
+    if (ratingKeys.length > 3) toast(`Adding ${ratingKeys.length} episodes to the queue…`);
+    const reqs: MediaReq[] = [];
+    for (const k of ratingKeys) {
+      try {
+        reqs.push(await plex.media(p, settings, k));
+      } catch (e) {
+        toast(String(e));
+      }
+    }
+    report(await enqueue(settings, reqs), ratingKeys.length);
+  };
+  const queueShow = async (item: Item) => {
+    if (!p) return;
+    const eps: Item[] = (await plex.get(p, `/library/metadata/${item.ratingKey}/allLeaves`)).Metadata || [];
+    queuePlex(eps.map((e) => String(e.ratingKey)));
+  };
+  const queueFiles = async (paths: string[]) => {
+    if (paths.length > 3) toast(`Adding ${paths.length} videos to the queue…`);
+    const reqs: MediaReq[] = [];
+    for (const path of paths) {
+      try {
+        reqs.push({ ...(await api.probeFile(path)), group: "folder-" + path.replace(/[\\/][^\\/]*$/, "") });
+      } catch (e) {
+        toast(String(e));
+      }
+    }
+    report(await enqueue(settings, reqs), paths.length);
+  };
 
   const connectPlex = async () => {
     setLinking(true);
@@ -218,32 +270,6 @@ export default function Library({ active }: { active: boolean }) {
       .media(p as PlexConn, settings, ratingKey)
       .then(play)
       .catch((e) => toast(String(e)));
-
-  /** Prepare every listed episode in the background so they are ready (and scored) before watching. */
-  const prepareAll = async (list: Item[]) => {
-    cancelBatch.current = false;
-    for (const ep of list) {
-      if (cancelBatch.current) break;
-      const key = `plex-${ep.ratingKey}`;
-      if (summaries[key]) continue;
-      setBatch({ key, label: `S${ep.parentIndex}E${ep.index} ${ep.title}`, pct: 0 });
-      try {
-        const req = await plex.media(p as PlexConn, settings, ep.ratingKey);
-        await api.prepare(req, {
-          target_lang: settings.targetLang,
-          native_lang: settings.nativeLang,
-          target_sub: "auto",
-          native_sub: "auto",
-          align: settings.align,
-        });
-        const s = await api.summaries([key]);
-        setSummaries((prev) => ({ ...prev, ...s }));
-      } catch (e) {
-        toast(`${ep.title}: ${e}`);
-      }
-    }
-    setBatch(null);
-  };
 
   const q = query.trim().toLowerCase();
   const filtered = q ? items.filter((i) => String(i.title).toLowerCase().includes(q)) : items;
@@ -388,6 +414,11 @@ export default function Library({ active }: { active: boolean }) {
                 <input placeholder="Search this library" value={query} onChange={(e) => setQuery(e.target.value)} />
               </label>
             )}
+            {source.kind === "folder" && files.length > 0 && (
+              <button className="ghost small" onClick={() => queueFiles(files.map((f) => f.path))}>
+                <Icon name="queue-add" size={15} /> Queue all
+              </button>
+            )}
             {source.kind === "folder" && (
               <button
                 className="ghost small"
@@ -427,13 +458,16 @@ export default function Library({ active }: { active: boolean }) {
                       <Icon name={i.type === "show" ? "library" : "play"} size={22} />
                     </div>
                     {i.type !== "show" && resume(key, i.viewOffset, i.duration)}
+                    {i.type === "show"
+                      ? queueButton("Prepare every episode in the background", () => queueShow(i))
+                      : queueButton("Prepare in the background", () => queuePlex([String(i.ratingKey)]))}
                   </div>
                   <div className="poster-title">{i.title}</div>
                   <div className="muted small-text">
                     {i.year}
                     {i.type === "show" && i.leafCount ? ` · ${i.leafCount} episodes` : ""}
                   </div>
-                  <DifficultyBadge s={summaries[key]} />
+                  {badge(key)}
                 </button>
               );
             })}
@@ -448,28 +482,18 @@ export default function Library({ active }: { active: boolean }) {
               </button>
               <h1>{show.title}</h1>
               <div className="spacer" />
-              {batch ? (
-                <>
-                  <span className="muted small-text">Preparing {batch.label}</span>
-                  <div className="bar">
-                    <div style={{ width: batch.pct + "%" }} />
-                    <span>{Math.round(batch.pct)}%</span>
-                  </div>
-                  <button className="ghost small" onClick={() => (cancelBatch.current = true)}>
-                    Stop after this one
-                  </button>
-                </>
-              ) : (
-                <span className="muted small-text">Prepare episodes ahead of time to see how hard each one is.</span>
-              )}
+              <span className="muted small-text">Queue episodes to have them ready, and see how hard each one is.</span>
+              <button className="ghost small" onClick={() => queuePlex(episodes.map((e) => String(e.ratingKey)))}>
+                <Icon name="queue-add" size={15} /> Queue all
+              </button>
             </div>
             {seasons.map(([num, eps]) => (
               <div key={num} className="season">
                 <div className="row">
                   <h2>{num === 0 ? "Specials" : `Season ${num}`}</h2>
                   <div className="spacer" />
-                  <button className="ghost small" disabled={!!batch} onClick={() => prepareAll(eps)}>
-                    Prepare season
+                  <button className="ghost small" onClick={() => queuePlex(eps.map((e) => String(e.ratingKey)))}>
+                    <Icon name="queue-add" size={15} /> Queue season
                   </button>
                 </div>
                 {eps.map((e) => {
@@ -481,8 +505,9 @@ export default function Library({ active }: { active: boolean }) {
                         {e.title}
                         {resume(key, e.viewOffset, e.duration)}
                       </span>
-                      <DifficultyBadge s={summaries[key]} />
+                      {badge(key)}
                       <span className="muted">{fmtTime((e.duration || 0) / 1000)}</span>
+                      {queueButton("Prepare in the background", () => queuePlex([String(e.ratingKey)]))}
                     </button>
                   );
                 })}
@@ -502,7 +527,8 @@ export default function Library({ active }: { active: boolean }) {
                     {f.name}
                     {resume(f.key)}
                   </span>
-                  <DifficultyBadge s={summaries[f.key]} />
+                  {badge(f.key)}
+                  {queueButton("Prepare in the background", () => queueFiles([f.path]))}
                 </button>
               </div>
             ))}

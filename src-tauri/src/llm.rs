@@ -45,6 +45,11 @@ pub fn llm_status(state: State<AppState>) -> LlmStatus {
     LlmStatus { available: managed || custom_endpoint(&state).is_some(), managed }
 }
 
+pub fn available(state: &AppState) -> bool {
+    (components::locate(state, "llama").is_some() && components::locate(state, "llm-model").is_some())
+        || custom_endpoint(state).is_some()
+}
+
 /// Base URL of a ready chat endpoint, starting our own server on first use.
 async fn endpoint(state: &AppState) -> anyhow::Result<(String, String)> {
     if let Some(custom) = custom_endpoint(state) {
@@ -93,11 +98,15 @@ async fn endpoint(state: &AppState) -> anyhow::Result<(String, String)> {
 }
 
 async fn chat(state: &AppState, system: &str, user: &str) -> anyhow::Result<String> {
+    chat_with(state, system, user, 500, 0.3).await
+}
+
+async fn chat_with(state: &AppState, system: &str, user: &str, max_tokens: u32, temperature: f64) -> anyhow::Result<String> {
     let (base, model) = endpoint(state).await?;
     let mut body = json!({
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "temperature": 0.3,
-        "max_tokens": 500,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "stream": false,
     });
     if !model.is_empty() {
@@ -121,8 +130,9 @@ async fn chat(state: &AppState, system: &str, user: &str) -> anyhow::Result<Stri
         .ok_or_else(|| anyhow!("the local LLM returned an empty answer"))
 }
 
-fn lang_name(code: &str) -> &str {
+pub fn lang_name(code: &str) -> &str {
     match code {
+        "en" => "English",
         "fr" => "French",
         "ja" => "Japanese",
         "es" => "Spanish",
@@ -152,6 +162,75 @@ pub async fn llm_explain(state: State<'_, AppState>, lang: String, text: String,
         )
     };
     Ok(chat(&state, &system, &user).await?)
+}
+
+/// Translate subtitle lines a batch at a time, keeping exactly one output line per input line.
+pub async fn translate_lines(
+    state: &AppState,
+    from: &str,
+    to: &str,
+    lines: &[String],
+    mut progress: impl FnMut(f64),
+) -> anyhow::Result<Vec<String>> {
+    const BATCH: usize = 25;
+    let (from_name, to_name) = (lang_name(from), lang_name(to));
+    let system = format!(
+        "You translate film subtitles from {from_name} into natural, everyday {to_name}, the way professional {to_name} \
+         subtitles are written. Keep each line about as short as the original. Reply with exactly one numbered line for \
+         each numbered input line, in the same order, and nothing else."
+    );
+    let numbered = regex::Regex::new(r"^\s*\**\s*(\d+)\s*[.):\-]\s*(.*)$").unwrap();
+    let pick = |answer: &str, n_max: usize| -> Vec<Option<String>> {
+        let mut got: Vec<Option<String>> = vec![None; n_max];
+        for line in answer.lines() {
+            if let Some(c) = numbered.captures(line) {
+                let n: usize = c[1].parse().unwrap_or(0);
+                if n >= 1 && n <= n_max && got[n - 1].is_none() {
+                    got[n - 1] = Some(c[2].trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        got
+    };
+    let mut out: Vec<String> = vec![String::new(); lines.len()];
+    let batches = lines.len().div_ceil(BATCH).max(1);
+    for (b, chunk) in lines.chunks(BATCH).enumerate() {
+        let base = b * BATCH;
+        // A little of what came before helps with pronouns and tone.
+        let context: Vec<&str> = lines[base.saturating_sub(3)..base].iter().map(String::as_str).collect();
+        let mut prompt = String::new();
+        if !context.is_empty() {
+            prompt.push_str(&format!("Earlier lines, for context only (do not translate them): {}\n\n", context.join(" / ")));
+        }
+        prompt.push_str("Translate:\n");
+        for (i, l) in chunk.iter().enumerate() {
+            prompt.push_str(&format!("{}. {}\n", i + 1, l.replace('\n', " ")));
+        }
+        let mut got: Vec<Option<String>> = vec![None; chunk.len()];
+        for attempt in 0..2 {
+            let answer = chat_with(state, &system, &prompt, 1800, if attempt == 0 { 0.2 } else { 0.5 }).await?;
+            for (i, g) in pick(&answer, chunk.len()).into_iter().enumerate() {
+                if got[i].is_none() {
+                    got[i] = g;
+                }
+            }
+            if got.iter().filter(|g| g.is_some()).count() * 10 >= chunk.len() * 9 {
+                break;
+            }
+        }
+        for (i, g) in got.into_iter().enumerate() {
+            out[base + i] = match g {
+                Some(t) => t,
+                // The model skipped this line: translate it on its own.
+                None => match chat_with(state, &system, &format!("Translate:\n1. {}", chunk[i]), 200, 0.2).await {
+                    Ok(a) => pick(&a, 1).pop().flatten().unwrap_or_else(|| a.trim().to_string()),
+                    Err(_) => String::new(),
+                },
+            };
+        }
+        progress((b + 1) as f64 / batches as f64 * 100.0);
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -188,7 +267,7 @@ pub async fn shadow_score(state: State<'_, AppState>, audio: Vec<u8>, expected: 
     if !out.status.success() {
         return Err(anyhow!("could not read the recording: {}", String::from_utf8_lossy(&out.stderr)).into());
     }
-    let _busy = state.prepare_lock.lock().await;
+    // Not behind the preparation lock: a short recording should not wait for a whole episode.
     let heard = media::whisper_words(&state, &wav, &lang, &tmp.join("rec"), |_| {}).await?;
     let _ = tokio::fs::remove_dir_all(&tmp).await;
     let heard_text = heard

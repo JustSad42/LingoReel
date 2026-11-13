@@ -6,6 +6,10 @@ export type Prepared = {
   key: string;
   title: string;
   lang: string;
+  /** Language of the audio; differs from lang for an English film studied with French subtitles. */
+  spoken?: string;
+  /** The learned-language lines were machine-translated. */
+  translated?: boolean;
   cues: Cue[];
   aligned: boolean;
   target_source: string;
@@ -117,6 +121,8 @@ export type Occurrence = {
   en: string;
   word: string;
 };
+export type QueueItem = { key: string; title: string; state: "working" | "waiting" | "failed"; error: string; stage: string; pct: number };
+export type QueueList = { items: QueueItem[]; paused: boolean };
 export type FileEntry = { path: string; name: string; folder: string; key: string };
 export type PlexConn = { name: string; url: string; token: string };
 
@@ -217,6 +223,14 @@ export const api = {
   mpvStop: () => invoke("mpv_stop"),
   prepare: (req: MediaReq, opts: PrepareOpts) => invoke<Prepared>("prepare_media", { req, opts }),
   prepared: (key: string) => invoke<Prepared | null>("prepared_get", { key }),
+  /** Background preparation queue. `front` puts items next in line; `now` starts them straight away. */
+  queueAdd: (items: { req: MediaReq; opts: PrepareOpts }[], front = false, now = false) =>
+    invoke<number>("queue_add", { items, front, now }),
+  queueList: () => invoke<QueueList>("queue_list"),
+  queueRemove: (key: string) => invoke("queue_remove", { key }),
+  queueRetry: (key: string) => invoke("queue_retry", { key }),
+  queueClear: (failedOnly: boolean) => invoke("queue_clear", { failedOnly }),
+  queuePause: (paused: boolean) => invoke("queue_pause", { paused }),
   preparedDelete: (key: string) => invoke("prepared_delete", { key }),
   stats: (key: string) => invoke<MediaStats | null>("media_stats", { key }),
   summaries: (keys: string[]) => invoke<Record<string, MediaStats>>("media_summaries", { keys }),
@@ -243,6 +257,17 @@ export const api = {
   http: (method: string, url: string, headers: Record<string, string> = {}, timeoutMs = 20000) =>
     invoke<any>("http_json", { method, url, headers, timeoutMs }),
 };
+
+const LANG_CODES: Record<string, string> = {
+  fre: "fr", fra: "fr", french: "fr", eng: "en", english: "en", jpn: "ja", japanese: "ja", spa: "es", spanish: "es",
+  ger: "de", deu: "de", german: "de", ita: "it", italian: "it", por: "pt", portuguese: "pt", kor: "ko", chi: "zh", zho: "zh",
+  rus: "ru", dut: "nl", nld: "nl",
+};
+/** Two-letter language code from Plex/FFmpeg tags such as "eng", "en-US" or "French". */
+export function lang2(code: string): string {
+  const c = (code || "").trim().toLowerCase().split(/[-_]/)[0];
+  return LANG_CODES[c] ?? c;
+}
 
 export const LANGS: Record<string, string> = {
   fr: "French",

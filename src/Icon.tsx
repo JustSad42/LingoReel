@@ -137,6 +137,24 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="m2 2 20 20M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </>
   ),
+  queue: (
+    <>
+      <path d="M3 6h13M3 12h13M3 18h8" />
+      <path d="m16 15 5 3-5 3z" />
+    </>
+  ),
+  "queue-add": (
+    <>
+      <path d="M3 6h13M3 12h9M3 18h6" />
+      <path d="M18 13v8M14 17h8" />
+    </>
+  ),
+  retry: (
+    <>
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5" />
+    </>
+  ),
   server: (
     <>
       <rect x="2" y="3" width="20" height="7" rx="2" />
