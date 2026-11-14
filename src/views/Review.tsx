@@ -29,13 +29,15 @@ export default function Review() {
   const [loaded, setLoaded] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
   const [tts, setTts] = useState(false);
+  const [ttsEn, setTtsEn] = useState(false);
   useEffect(() => {
     api.ttsReady(lang).then(setTts).catch(() => {});
+    api.ttsReady("en").then(setTtsEn).catch(() => {});
   }, [lang]);
-  const hear = async (text: string) => {
+  const hear = async (text: string, voice = lang) => {
     try {
       video.current?.pause();
-      await new Audio(convertFileSrc(await api.speak(lang, text, settings.ttsSlow))).play();
+      await new Audio(convertFileSrc(await api.speak(voice, text, settings.ttsSlow))).play();
     } catch (e) {
       toast(String(e));
     }
@@ -144,7 +146,16 @@ export default function Review() {
                 {card.definition ? ` — ${card.definition}` : ""}
               </div>
             )}
-            {card.translation && <div className="flash-translation">{card.translation}</div>}
+            {card.translation && (
+              <div className="flash-translation">
+                {card.translation}
+                {ttsEn && (
+                  <button className="icon-btn small" title="Hear the translation" onClick={() => hear(card.translation, "en")}>
+                    <Icon name="speak" size={16} />
+                  </button>
+                )}
+              </div>
+            )}
             {!card.translation && !card.definition && <div className="muted">No translation was saved with this card.</div>}
             <div className="answers">
               {ANSWERS.map((label, i) => (

@@ -110,6 +110,8 @@ pub const VOICES: &[(&str, &str, &str)] = &[
     ("de", "de/de_DE/thorsten/medium", "de_DE-thorsten-medium"),
     ("it", "it/it_IT/paola/medium", "it_IT-paola-medium"),
     ("pt", "pt/pt_BR/faber/medium", "pt_BR-faber-medium"),
+    // For the English side: mixed subtitles and the translation on review cards.
+    ("en", "en/en_US/lessac/medium", "en_US-lessac-medium"),
 ];
 const PIPER_URL: &str = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
 // Pinned: voices retrained for newer Piper versions use sound codes this engine cannot read.
@@ -265,6 +267,14 @@ pub fn components_status(state: State<AppState>) -> Res<Vec<Component>> {
                     out.push(describe(&state, &id, &format!("{name} voice"), &about, 64, false));
                 }
             }
+            out.push(describe(
+                &state,
+                "voice-en",
+                "English voice",
+                "Reads the English words of mixed subtitles and the translation on review cards.",
+                64,
+                false,
+            ));
         }
     }
     Ok(out)

@@ -607,3 +607,4 @@ button.on-toggle { color: var(--accent); background: var(--accent-soft); border-
   background: rgba(12, 12, 18, 0.66); color: var(--accent); border: 1px solid rgba(255, 176, 74, 0.4); backdrop-filter: blur(8px);
 }
 .flash-sentence .icon-btn { vertical-align: middle; margin-left: 6px; }
+.flash-translation .icon-btn { vertical-align: middle; margin-left: 6px; }

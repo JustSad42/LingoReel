@@ -34,7 +34,7 @@ model. After that the app works offline and updates itself.
 - **Real subtitles through Plex** – when a video has no subtitles in the language you study, LingoReel asks your Plex server to download some (OpenSubtitles) before falling back to a translation. Spanish prefers subtitles from Spain.
 - **Beginner translations** – when the local model translates, choose natural subtitles or simple ones (short sentences, common words). Spanish translations use Spain's Spanish.
 - **Mixed subtitles** – the English line with the words you are learning or know shown in the studied language; click one to look it up.
-- **Read aloud** – an offline voice (Piper) reads words, lines and review cards aloud, or every line in turn. Voices for French, Spanish (Spain), German, Italian and Portuguese.
+- **Read aloud** – an offline voice (Piper) reads words, lines and review cards aloud, or every line in turn. Voices for French, Spanish (Spain), German, Italian and Portuguese, plus an English voice that reads mixed subtitles and review-card translations.
 - **Keep ready** – mark a series and its next 3 unwatched episodes are always prepared.
 - **Background queue** – queue movies, episodes, seasons or whole series from the Library and they are prepared one after another while you do something else. Pausing frees the graphics card; the queue carries on after a restart.
 - **Next episode** – the following episode is prepared in the background while you watch, then offered when the credits start.

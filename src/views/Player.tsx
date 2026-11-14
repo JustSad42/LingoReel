@@ -88,6 +88,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const [llm, setLlm] = useState(false);
   const [style, setStyle] = useState(settings.translateStyle || "natural");
   const [ttsOk, setTtsOk] = useState(false);
+  const [ttsEn, setTtsEn] = useState(false);
   const [mix, setMix] = useState<[number, number][][]>([]);
 
   const [paused, setPaused] = useState(false);
@@ -176,6 +177,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         if (!listenOk) setAlign(false);
         api.llmStatus().then((s) => setLlm(s.available));
         api.ttsReady(lang).then(setTtsOk).catch(() => {});
+        api.ttsReady("en").then(setTtsEn).catch(() => {});
         await api.mpvStart();
         const existing = await api.prepared(media.key);
         if (cancelled) return;
@@ -388,7 +390,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
           setDict((d) => (d && d.cue === at && !d.marks ? d : { cue: at, input: "" }));
         } else if (live.current.readAloud) {
           const at = idx;
-          speakRef.current(list[at].text, () => {
+          speakLineRef.current(at, () => {
             // Carry on, unless auto-pause is on or the learner has moved elsewhere meanwhile.
             if (!live.current.settings.autoPause && holdIdx.current === at && pausedRef.current) api.mpv("set_property", "pause", false);
           });
@@ -674,29 +676,61 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
   // ---------- reading aloud with the offline voice ----------
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const speak = async (text: string, after?: () => void) => {
+  const speakToken = useRef(0);
+  type Run = { lang: string; text: string };
+  /** Speak pieces in turn, each in its own voice (mixed lines switch between English and the studied language). */
+  const speakRuns = async (runs: Run[], after?: () => void) => {
+    const my = ++speakToken.current;
+    audioRef.current?.pause();
     try {
-      audioRef.current?.pause();
-      const path = await api.speak(lang, text, live.current.settings.ttsSlow);
-      const a = new Audio(convertFileSrc(path));
-      audioRef.current = a;
-      a.volume = Math.min(1, (live.current.settings.volume ?? 100) / 100);
-      a.onended = () => after?.();
-      a.onerror = () => after?.();
-      await a.play();
+      // Make every clip first so the voices follow each other without gaps.
+      const paths = await Promise.all(runs.map((r) => api.speak(r.lang, r.text, live.current.settings.ttsSlow)));
+      for (const path of paths) {
+        if (my !== speakToken.current) return;
+        await new Promise<void>((done) => {
+          const a = new Audio(convertFileSrc(path));
+          audioRef.current = a;
+          a.volume = Math.min(1, (live.current.settings.volume ?? 100) / 100);
+          a.onended = () => done();
+          a.onerror = () => done();
+          a.play().catch(() => done());
+        });
+      }
     } catch (e) {
       toast(String(e));
-      after?.();
     }
+    if (my === speakToken.current) after?.();
   };
-  const speakRef = useRef(speak);
-  speakRef.current = speak;
+  const speak = (text: string, after?: () => void) => speakRuns([{ lang, text }], after);
+  /** A mixed line as voice pieces: English words in the English voice, swapped words in the studied language. */
+  const mixedRuns = (ci: number): Run[] | null => {
+    const c = cuesRef.current[ci];
+    if (!c || !c.en || settings.subMode !== "mixed" || !ttsEn) return null;
+    const pairs = new Map((mix[ci] || []).map(([j, t]) => [j, t]));
+    const runs: Run[] = [];
+    const push = (l: string, t: string) => {
+      const last = runs[runs.length - 1];
+      if (last && last.lang === l) last.text += t;
+      else runs.push({ lang: l, text: t });
+    };
+    c.en.split(/([\p{L}\p{N}'’]+)/u).forEach((part, k) => {
+      const ti = k % 2 === 1 ? pairs.get((k - 1) / 2) : undefined;
+      const tok = ti !== undefined ? c.tokens[ti] : undefined;
+      const status = tok?.lemma ? words.get(tok.lemma) ?? 0 : 0;
+      if (tok && (status === 1 || status === 2)) push(lang, " " + tok.t + " ");
+      else push("en", part);
+    });
+    return runs.filter((r) => /[\p{L}\p{N}]/u.test(r.text));
+  };
+  const speakLine = (ci: number, after?: () => void) => speakRuns(mixedRuns(ci) ?? [{ lang, text: cuesRef.current[ci].text }], after);
+  const speakLineRef = useRef(speakLine);
+  speakLineRef.current = speakLine;
   useEffect(() => () => audioRef.current?.pause(), []);
   const hearLine = () => {
     const ci = currentLine();
     if (ci < 0 || !ttsOk) return;
     if (!pausedRef.current) api.mpv("set_property", "pause", true);
-    speak(cuesRef.current[ci].text);
+    speakLine(ci);
   };
   const toggleDictation = () => {
     if (!dictOn && foreign) {
