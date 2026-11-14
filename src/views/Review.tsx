@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api, Card, fmtInterval } from "../api";
 import { useApp } from "../App";
+import Icon from "../Icon";
 
 const ANSWERS = ["Again", "Hard", "Good", "Easy"];
 
@@ -27,6 +28,18 @@ export default function Review() {
   const [counts, setCounts] = useState({ due: 0, new: 0, total: 0, reviewed_today: 0 });
   const [loaded, setLoaded] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
+  const [tts, setTts] = useState(false);
+  useEffect(() => {
+    api.ttsReady(lang).then(setTts).catch(() => {});
+  }, [lang]);
+  const hear = async (text: string) => {
+    try {
+      video.current?.pause();
+      await new Audio(convertFileSrc(await api.speak(lang, text, settings.ttsSlow))).play();
+    } catch (e) {
+      toast(String(e));
+    }
+  };
 
   const load = useCallback(async () => {
     setQueue(await api.cardsDue(lang, 50));
@@ -67,10 +80,11 @@ export default function Review() {
         else grade(3);
       } else if (revealed && ["1", "2", "3", "4"].includes(e.key)) grade(+e.key);
       else if (e.key.toLowerCase() === "r") video.current?.play();
+      else if (e.key.toLowerCase() === "h" && tts) hear(card.sentence);
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [card, revealed, grade]);
+  }, [card, revealed, grade, tts]);
 
   if (!loaded) return null;
   if (!card) {
@@ -115,6 +129,11 @@ export default function Review() {
         )}
         <div className="flash-sentence">
           <Sentence card={card} />
+          {tts && (
+            <button className="icon-btn small" title="Hear it read aloud (H)" onClick={() => hear(card.sentence)}>
+              <Icon name="speak" size={17} />
+            </button>
+          )}
         </div>
         <div className="muted small-text">{card.media_title}</div>
         {revealed ? (

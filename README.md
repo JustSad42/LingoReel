@@ -31,6 +31,11 @@ model. After that the app works offline and updates itself.
 - **Easy lines** – finds every line with exactly one word you do not know and adds them to review in one click.
 - **Hear it elsewhere** – plays other scenes from your prepared videos where the same word is spoken.
 - **English films too** – for a video whose audio is English (or any language other than the one you study), you read its French subtitles with the English line underneath, each line timed to the speech. With no French subtitles, the local model translates the English ones.
+- **Real subtitles through Plex** – when a video has no subtitles in the language you study, LingoReel asks your Plex server to download some (OpenSubtitles) before falling back to a translation. Spanish prefers subtitles from Spain.
+- **Beginner translations** – when the local model translates, choose natural subtitles or simple ones (short sentences, common words). Spanish translations use Spain's Spanish.
+- **Mixed subtitles** – the English line with the words you are learning or know shown in the studied language; click one to look it up.
+- **Read aloud** – an offline voice (Piper) reads words, lines and review cards aloud, or every line in turn. Voices for French, Spanish (Spain), German, Italian and Portuguese.
+- **Keep ready** – mark a series and its next 3 unwatched episodes are always prepared.
 - **Background queue** – queue movies, episodes, seasons or whole series from the Library and they are prepared one after another while you do something else. Pausing frees the graphics card; the queue carries on after a restart.
 - **Next episode** – the following episode is prepared in the background while you watch, then offered when the credits start.
 - **Skip intro and credits** – uses the intro and credits markers from your Plex server when it has them.
@@ -66,6 +71,8 @@ speed, volume and last library.
 | G | Tense colours |
 | I | Skip the intro |
 | N | Next episode |
+| H | Hear the line read aloud |
+| L | Read every line aloud |
 | [ and ] | Slower / faster |
 | F | Fullscreen |
 | Esc | Close / back |

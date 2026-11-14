@@ -216,6 +216,16 @@ impl Dict {
         .unwrap_or_default()
     }
 
+    /// English glosses of a lemma (already normalised), first senses first.
+    pub fn glosses(&self, norm_lemma: &str) -> Vec<String> {
+        self.entries_for(norm_lemma, vec![])
+            .into_iter()
+            .filter(|e| !matches!(e.pos.as_str(), "name" | "proper noun"))
+            .flat_map(|e| e.glosses.into_iter().take(4))
+            .take(8)
+            .collect()
+    }
+
     pub fn lookup(&mut self, surface: &str) -> Lookup {
         let n = norm(surface);
         let lemma = self.lemma(&n);

@@ -170,14 +170,28 @@ pub async fn translate_lines(
     from: &str,
     to: &str,
     lines: &[String],
+    style: &str,
     mut progress: impl FnMut(f64),
 ) -> anyhow::Result<Vec<String>> {
     const BATCH: usize = 25;
-    let (from_name, to_name) = (lang_name(from), lang_name(to));
+    let from_name = lang_name(from);
+    let to_name = if to == "es" { "Spanish from Spain (castellano)" } else { lang_name(to) };
+    let variant = if to == "es" {
+        " Use Spain's Spanish: vosotros forms and Spain's vocabulary (coche, ordenador, móvil, vale), never Latin American usage."
+    } else {
+        ""
+    };
+    let how = if style == "beginner" {
+        format!(
+            "simple {to_name} for a beginner (level A2): short sentences, the most common words, and simple tenses \
+             (present, the everyday past tense, near future). Keep the meaning but drop idioms, slang and rare words."
+        )
+    } else {
+        format!("natural, everyday {to_name}, the way professional {to_name} subtitles are written")
+    };
     let system = format!(
-        "You translate film subtitles from {from_name} into natural, everyday {to_name}, the way professional {to_name} \
-         subtitles are written. Keep each line about as short as the original. Reply with exactly one numbered line for \
-         each numbered input line, in the same order, and nothing else."
+        "You translate film subtitles from {from_name} into {how}.{variant} Keep each line about as short as the original. \
+         Reply with exactly one numbered line for each numbered input line, in the same order, and nothing else."
     );
     let numbered = regex::Regex::new(r"^\s*\**\s*(\d+)\s*[.):\-]\s*(.*)$").unwrap();
     let pick = |answer: &str, n_max: usize| -> Vec<Option<String>> {
@@ -231,6 +245,13 @@ pub async fn translate_lines(
         progress((b + 1) as f64 / batches as f64 * 100.0);
     }
     Ok(out)
+}
+
+/// Free the graphics memory held by our model server (it starts again when needed).
+pub async fn unload(state: &AppState) {
+    if let Some(mut s) = state.llm.lock().await.take() {
+        s.kill();
+    }
 }
 
 #[tauri::command]

@@ -40,6 +40,8 @@ export type MediaReq = {
   plexId?: string;
   /** Series or folder this belongs to; audio choices are remembered per group. */
   group?: string;
+  /** Where the item lives on Plex, so the server can be asked for missing subtitles. */
+  plex?: { url: string; token: string; id: string };
   /** Intro and credits ranges in seconds, when Plex has detected them. */
   markers?: { type: string; start: number; end: number }[];
 };
@@ -49,6 +51,8 @@ export type PrepareOpts = {
   target_sub: string;
   native_sub: string;
   align: boolean;
+  /** Machine translation style: "natural" or "beginner". */
+  style?: string;
 };
 export type Entry = {
   word: string;
@@ -166,6 +170,15 @@ export type Settings = {
   llmUrl: string;
   llmModel: string;
   setupDone: boolean;
+  /** Series (Plex rating key -> title) whose next unwatched episodes are kept prepared. */
+  keepReady: Record<string, string>;
+  /** Read each line aloud with the offline voice after it is shown. */
+  readAloud: boolean;
+  ttsSlow: boolean;
+  /** "natural" | "beginner" */
+  translateStyle: string;
+  /** Ask Plex to download missing subtitles in the studied language. */
+  fetchSubs: boolean;
 };
 
 export const DEFAULTS: Settings = {
@@ -198,6 +211,11 @@ export const DEFAULTS: Settings = {
   llmUrl: "",
   llmModel: "",
   setupDone: false,
+  keepReady: {},
+  readAloud: false,
+  ttsSlow: false,
+  translateStyle: "natural",
+  fetchSubs: true,
 };
 
 /** Word status: 0 new, 1 learning, 2 known, 3 ignored (names, noise). */
@@ -227,6 +245,10 @@ export const api = {
   queueAdd: (items: { req: MediaReq; opts: PrepareOpts }[], front = false, now = false) =>
     invoke<number>("queue_add", { items, front, now }),
   queueList: () => invoke<QueueList>("queue_list"),
+  ttsReady: (lang: string) => invoke<boolean>("tts_ready", { lang }),
+  speak: (lang: string, text: string, slow: boolean) => invoke<string>("tts_speak", { lang, text, slow }),
+  /** Mixed subtitles: per line, pairs of [English word index, studied-language token index]. */
+  mix: (key: string) => invoke<[number, number][][]>("media_mix", { key }),
   queueRemove: (key: string) => invoke("queue_remove", { key }),
   queueRetry: (key: string) => invoke("queue_retry", { key }),
   queueClear: (failedOnly: boolean) => invoke("queue_clear", { failedOnly }),
@@ -578,6 +600,7 @@ export const plex = {
     return {
       key: `plex-${ratingKey}`,
       plexId: String(ratingKey),
+      plex: { url: p.url, token: p.token, id: String(ratingKey) },
       group: `plex-${md.grandparentRatingKey || ratingKey}`,
       markers: (md.Marker || [])
         .filter((m: any) => m.type === "intro" || m.type === "credits")

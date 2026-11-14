@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { api, LEARN_LANGS } from "../api";
+import { api, LANGS, LEARN_LANGS } from "../api";
 import { useApp } from "../App";
 
 export default function SettingsView() {
@@ -29,7 +29,12 @@ export default function SettingsView() {
     setChecking(false);
   };
 
-  const toggle = (key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors" | "prepareNext", label: string, hint: string) => (
+  const langName = LANGS[settings.targetLang] || settings.targetLang;
+  const toggle = (
+    key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors" | "prepareNext" | "fetchSubs" | "ttsSlow" | "readAloud",
+    label: string,
+    hint: string,
+  ) => (
     <label className="check">
       <input type="checkbox" checked={settings[key]} onChange={(e) => save({ [key]: e.target.checked })} />
       <span>
@@ -53,13 +58,14 @@ export default function SettingsView() {
           <input type="range" min={0.5} max={0.95} step={0.05} value={settings.slowSpeed} onChange={(e) => save({ slowSpeed: +e.target.value })} />
         </label>
         {toggle("colorWords", "Underline words by how well you know them", "orange is new, yellow is learning, plain is known")}
-        {toggle("tenseColors", "Colour verbs by tense", "passé composé, imparfait, futur and others each get their own colour")}
+        {toggle("tenseColors", "Colour verbs by tense", "each tense gets its own colour")}
         <label>
-          French line
+          {langName} line
           <select value={settings.subMode} onChange={(e) => save({ subMode: e.target.value })}>
             <option value="full">Every word shown equally</option>
             <option value="focus">Words you know are dimmed, new words stand out</option>
             <option value="listen">Shown only after the line has been spoken</option>
+            <option value="mixed">Mixed: the English line with the words you know in {langName}</option>
           </select>
         </label>
         <label>
@@ -87,6 +93,27 @@ export default function SettingsView() {
         </label>
         {toggle("prepareNext", "Prepare the next episode while I watch", "so it is ready to study the moment the current one ends")}
         {toggle("align", "Time every word from the audio by default", "applies when preparing a video; needs speech recognition from Setup")}
+      </section>
+
+      <section className="card">
+        <h2>Films in English</h2>
+        <p className="muted">
+          For videos whose audio is not in {langName}: you read {langName} subtitles with the English line underneath.
+        </p>
+        {toggle(
+          "fetchSubs",
+          `Ask Plex for ${langName} subtitles when a video has none`,
+          "the server downloads them from OpenSubtitles and keeps them with the video; uses the internet for that moment",
+        )}
+        <label>
+          When the local model has to translate
+          <select value={settings.translateStyle} onChange={(e) => save({ translateStyle: e.target.value })}>
+            <option value="natural">Natural, like real subtitles</option>
+            <option value="beginner">Beginner: short sentences and common words</option>
+          </select>
+        </label>
+        {toggle("readAloud", `Read each ${langName} line aloud`, "pauses after every line and reads it with the offline voice from Setup (L)")}
+        {toggle("ttsSlow", "Read aloud slowly", "for words, lines and review cards")}
       </section>
 
       <section className="card">

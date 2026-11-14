@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, FileEntry, fmtTime, MediaReq, MediaStats, plex, PlexConn } from "../api";
 import { enqueue, overall, useQueue } from "../queue";
+import { KEEP_AHEAD } from "../keepReady";
 import { useApp } from "../App";
 import Icon from "../Icon";
 
@@ -458,6 +459,11 @@ export default function Library({ active }: { active: boolean }) {
                       <Icon name={i.type === "show" ? "library" : "play"} size={22} />
                     </div>
                     {i.type !== "show" && resume(key, i.viewOffset, i.duration)}
+                    {i.type === "show" && settings.keepReady?.[i.ratingKey] && (
+                      <span className="kept-badge" title="Next episodes kept ready">
+                        <Icon name="bolt" size={13} />
+                      </span>
+                    )}
                     {i.type === "show"
                       ? queueButton("Prepare every episode in the background", () => queueShow(i))
                       : queueButton("Prepare in the background", () => queuePlex([String(i.ratingKey)]))}
@@ -483,6 +489,28 @@ export default function Library({ active }: { active: boolean }) {
               <h1>{show.title}</h1>
               <div className="spacer" />
               <span className="muted small-text">Queue episodes to have them ready, and see how hard each one is.</span>
+              {(() => {
+                const kept = !!settings.keepReady?.[show.ratingKey];
+                return (
+                  <button
+                    className={kept ? "small on-toggle" : "ghost small"}
+                    title={`Always keep the next ${KEEP_AHEAD} unwatched episodes prepared`}
+                    onClick={() => {
+                      const next = { ...(settings.keepReady || {}) };
+                      if (kept) delete next[show.ratingKey];
+                      else next[show.ratingKey] = show.title;
+                      save({ keepReady: next });
+                      toast(
+                        kept
+                          ? `${show.title} is no longer kept ready.`
+                          : `The next ${KEEP_AHEAD} unwatched episodes of ${show.title} will always be prepared.`,
+                      );
+                    }}
+                  >
+                    <Icon name="bolt" size={15} /> {kept ? "Kept ready" : "Keep ready"}
+                  </button>
+                );
+              })()}
               <button className="ghost small" onClick={() => queuePlex(episodes.map((e) => String(e.ratingKey)))}>
                 <Icon name="queue-add" size={15} /> Queue all
               </button>

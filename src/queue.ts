@@ -61,6 +61,7 @@ export const optsFor = (s: Settings) => ({
   target_sub: "auto",
   native_sub: "auto",
   align: s.align,
+  style: s.translateStyle,
 });
 
 /** Add videos to the end of the queue; returns how many were new. */

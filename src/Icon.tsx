@@ -137,6 +137,13 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="m2 2 20 20M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </>
   ),
+  speak: (
+    <>
+      <path d="M21 11.5a8.4 8.4 0 0 1-12.2 7.5L3 20.5l1.6-5A8.4 8.4 0 1 1 21 11.5z" />
+      <path d="M9 10v3M12 8v7M15 10v3" />
+    </>
+  ),
+  bolt: <path d="M13 2 4 14h7l-1 8 9-12h-7z" />,
   queue: (
     <>
       <path d="M3 6h13M3 12h13M3 18h8" />

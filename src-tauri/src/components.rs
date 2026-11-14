@@ -102,6 +102,23 @@ pub const LANGUAGES: &[(&str, &str, u32)] = &[
     ("ja", "Japanese", 30),
 ];
 
+/// Offline voices (Piper) per studied language: folder on the voices repository and file name.
+/// Spanish uses a voice from Spain. Japanese has none that this Piper build can read.
+pub const VOICES: &[(&str, &str, &str)] = &[
+    ("fr", "fr/fr_FR/siwis/medium", "fr_FR-siwis-medium"),
+    ("es", "es/es_ES/davefx/medium", "es_ES-davefx-medium"),
+    ("de", "de/de_DE/thorsten/medium", "de_DE-thorsten-medium"),
+    ("it", "it/it_IT/paola/medium", "it_IT-paola-medium"),
+    ("pt", "pt/pt_BR/faber/medium", "pt_BR-faber-medium"),
+];
+const PIPER_URL: &str = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
+const VOICE_BASE: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main";
+
+fn voice(id: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    let code = id.strip_prefix("voice-")?;
+    VOICES.iter().find(|v| v.0 == code)
+}
+
 struct DictSpec {
     id: String,
     name: String,
@@ -136,6 +153,7 @@ fn specs() -> Vec<Spec> {
             size_mb: if gpu { 1625 } else { 490 },
             required: false,
         },
+        Spec { id: "piper", name: "Voice engine (Piper)", about: "Reads words and lines aloud, offline. Most useful for films in English.", size_mb: 22, required: false },
         Spec { id: "llama", name: "Local LLM engine (llama.cpp)", about: "Runs the explanation model on your own machine. Nothing leaves your PC.", size_mb: 40, required: false },
         Spec { id: "llm-model", name: "Explanation model (Gemma 3 4B)", about: "Explains phrases, idioms and grammar in context, fully offline.", size_mb: 2490, required: false },
     ]
@@ -149,6 +167,7 @@ pub fn dir(state: &AppState, id: &str) -> PathBuf {
     match id {
         "whisper-model" | "llm-model" => base.join("models"),
         id if id.starts_with("dict-") => base.join("dict"),
+        id if id.starts_with("voice-") => base.join("voices"),
         other => base.join(other),
     }
 }
@@ -176,6 +195,12 @@ pub fn locate(state: &AppState, id: &str) -> Option<PathBuf> {
         "llama" => find_file(&d, "llama-server.exe"),
         "llm-model" => Some(d.join(LLM_MODEL_FILE)).filter(|p| p.exists()),
         id if id.starts_with("dict-") => Some(d.join(format!("{id}.sqlite"))).filter(|p| p.exists()),
+        "piper" => find_file(&d, "piper.exe"),
+        id if id.starts_with("voice-") => {
+            let (_, _, file) = voice(id)?;
+            let model = d.join(format!("{file}.onnx"));
+            (model.exists() && d.join(format!("{file}.onnx.json")).exists()).then_some(model)
+        }
         _ => None,
     }
 }
@@ -231,6 +256,15 @@ pub fn components_status(state: State<AppState>) -> Res<Vec<Component>> {
     }
     for s in specs().into_iter().filter(|s| !s.required) {
         out.push(describe(&state, s.id, s.name, s.about, s.size_mb, false));
+        if s.id == "piper" {
+            for (code, name, _) in LANGUAGES {
+                let id = format!("voice-{code}");
+                if voice(&id).is_some() && (*code == target || locate(&state, &id).is_some()) {
+                    let about = if *code == "es" { "Voice from Spain (castellano).".to_string() } else { format!("Offline {name} voice.") };
+                    out.push(describe(&state, &id, &format!("{name} voice"), &about, 64, false));
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -279,6 +313,11 @@ async fn urls(state: &AppState, id: &str) -> anyhow::Result<Vec<String>> {
             "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/{LLM_MODEL_FILE}"
         )],
         id if id.starts_with("dict-") => vec![format!("{DATA_RELEASE}/{id}.sqlite.gz")],
+        "piper" => vec![PIPER_URL.into()],
+        id if id.starts_with("voice-") => {
+            let (_, folder, file) = voice(id).context("no voice for this language")?;
+            vec![format!("{VOICE_BASE}/{folder}/{file}.onnx"), format!("{VOICE_BASE}/{folder}/{file}.onnx.json")]
+        }
         _ => bail!("unknown component {id}"),
     })
 }
@@ -358,6 +397,9 @@ pub async fn component_remove(state: State<'_, AppState>, id: String) -> Res<()>
     match locate(&state, &id) {
         Some(p) if p.starts_with(&state.dir) => {
             if matches!(id.as_str(), "whisper-model" | "llm-model") || id.starts_with("dict-") {
+                tokio::fs::remove_file(p).await?;
+            } else if id.starts_with("voice-") {
+                let _ = tokio::fs::remove_file(p.with_extension("onnx.json")).await;
                 tokio::fs::remove_file(p).await?;
             } else {
                 tokio::fs::remove_dir_all(dir(&state, &id)).await?;

@@ -10,6 +10,7 @@ import Words from "./views/Words";
 import SettingsView from "./views/SettingsView";
 import QueueView from "./views/Queue";
 import { useQueue } from "./queue";
+import { useKeepReady } from "./keepReady";
 import Icon from "./Icon";
 import Backdrop from "./Backdrop";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -45,6 +46,7 @@ export default function App() {
   const pending = queue.items.filter((i) => i.state !== "failed").length;
   const busy = queue.items.some((i) => i.state === "working");
   const toastTimer = useRef<number>();
+  useKeepReady(settings ?? DEFAULTS, !!settings, !!playing);
 
   useEffect(() => {
     (async () => {

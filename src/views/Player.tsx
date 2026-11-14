@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api, Cue, Entry, fmtTime, freqLabel, gradeDictation, lang2, LANGS, Lookup, Mark, MediaReq, MediaStats, MinedLine, Occurrence, plex,
@@ -27,8 +28,8 @@ type Popup = {
 };
 type Dictation = { cue: number; input: string; marks?: Mark[] };
 type Elsewhere = { items: Occurrence[]; idx: number; back: number; lemma: string };
-const SUB_MODES = ["full", "focus", "listen"];
-const SUB_MODE_LABEL: Record<string, string> = { full: "all", focus: "focus", listen: "after hearing" };
+const SUB_MODES = ["full", "focus", "listen", "mixed"];
+const SUB_MODE_LABEL: Record<string, string> = { full: "all", focus: "focus", listen: "after hearing", mixed: "mixed" };
 type Shadow = {
   phase: "listen" | "record" | "scoring" | "result";
   cue: number;
@@ -85,6 +86,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const [canListen, setCanListen] = useState(false);
   const [align, setAlign] = useState(settings.align);
   const [llm, setLlm] = useState(false);
+  const [style, setStyle] = useState(settings.translateStyle || "natural");
+  const [ttsOk, setTtsOk] = useState(false);
+  const [mix, setMix] = useState<[number, number][][]>([]);
 
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(media.duration);
@@ -134,8 +138,8 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const recorder = useRef<MediaRecorder | null>(null);
   // The audio is in another language than the one studied (an English film with French subtitles).
   const foreign = !!prepared?.spoken && prepared.spoken !== prepared.lang;
-  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign });
-  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign };
+  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign, readAloud: false });
+  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign, readAloud: settings.readAloud && ttsOk };
   const dictInput = useRef<HTMLInputElement>(null);
   const audioApplied = useRef(false);
   const volTimer = useRef<number>();
@@ -171,6 +175,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         setCanListen(listenOk);
         if (!listenOk) setAlign(false);
         api.llmStatus().then((s) => setLlm(s.available));
+        api.ttsReady(lang).then(setTtsOk).catch(() => {});
         await api.mpvStart();
         const existing = await api.prepared(media.key);
         if (cancelled) return;
@@ -190,7 +195,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     };
   }, [media.key]);
 
-  const prepOpts = () => ({ target_lang: lang, native_lang: settings.nativeLang, target_sub: targetSub, native_sub: nativeSub, align });
+  const prepOpts = () => ({ target_lang: lang, native_lang: settings.nativeLang, target_sub: targetSub, native_sub: nativeSub, align, style });
   const stopWaiting = useRef<(() => void) | null>(null);
   useEffect(() => () => stopWaiting.current?.(), []);
   /** Prepare through the background queue, ahead of everything else, and play when done. */
@@ -366,7 +371,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       if (pausedRef.current && holdIdx.current >= 0) idx = holdIdx.current;
       const dictating = live.current.dictOn;
       if (
-        (s.autoPause || dictating) &&
+        (s.autoPause || dictating || live.current.readAloud) &&
         idx >= 0 &&
         !pausedRef.current &&
         !stopAt.current &&
@@ -381,6 +386,12 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
           const at = idx;
           // Keep what was typed if the line is merely being replayed.
           setDict((d) => (d && d.cue === at && !d.marks ? d : { cue: at, input: "" }));
+        } else if (live.current.readAloud) {
+          const at = idx;
+          speakRef.current(list[at].text, () => {
+            // Carry on, unless auto-pause is on or the learner has moved elsewhere meanwhile.
+            if (!live.current.settings.autoPause && holdIdx.current === at && pausedRef.current) api.mpv("set_property", "pause", false);
+          });
         }
       }
       if (idx !== idxRef.current) {
@@ -623,7 +634,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         });
         if (cancelled) return unlisten();
         await api.queueAdd(
-          [{ req: next, opts: { target_lang: lang, native_lang: settings.nativeLang, target_sub: "auto", native_sub: "auto", align: settings.align } }],
+          [{ req: next, opts: { target_lang: lang, native_lang: settings.nativeLang, target_sub: "auto", native_sub: "auto", align: settings.align, style: settings.translateStyle } }],
           true,
         );
       } catch {
@@ -651,7 +662,42 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
 
 
   // ---------- subtitle mode and dictation ----------
-  const cycleSubMode = () => save({ subMode: SUB_MODES[(SUB_MODES.indexOf(settings.subMode) + 1) % SUB_MODES.length] });
+  const cycleSubMode = () => {
+    const next = SUB_MODES[(SUB_MODES.indexOf(settings.subMode) + 1) % SUB_MODES.length];
+    save({ subMode: next });
+    if (next === "mixed")
+      toast(`Mixed: the English line, with the words you are learning or know shown in ${LANGS[lang] || lang}. Click one to look it up.`);
+  };
+  useEffect(() => {
+    if (phase === "playing" && settings.subMode === "mixed") api.mix(media.key).then(setMix).catch(() => setMix([]));
+  }, [phase, settings.subMode, prepared]);
+
+  // ---------- reading aloud with the offline voice ----------
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const speak = async (text: string, after?: () => void) => {
+    try {
+      audioRef.current?.pause();
+      const path = await api.speak(lang, text, live.current.settings.ttsSlow);
+      const a = new Audio(convertFileSrc(path));
+      audioRef.current = a;
+      a.volume = Math.min(1, (live.current.settings.volume ?? 100) / 100);
+      a.onended = () => after?.();
+      a.onerror = () => after?.();
+      await a.play();
+    } catch (e) {
+      toast(String(e));
+      after?.();
+    }
+  };
+  const speakRef = useRef(speak);
+  speakRef.current = speak;
+  useEffect(() => () => audioRef.current?.pause(), []);
+  const hearLine = () => {
+    const ci = currentLine();
+    if (ci < 0 || !ttsOk) return;
+    if (!pausedRef.current) api.mpv("set_property", "pause", true);
+    speak(cuesRef.current[ci].text);
+  };
   const toggleDictation = () => {
     if (!dictOn && foreign) {
       toast(`Dictation needs ${LANGS[lang] || lang} audio; this video is in ${LANGS[prepared?.spoken || ""] || "another language"}.`);
@@ -813,6 +859,8 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         if (ci >= 0) saveCard(ci, "", "", "");
       },
       r: startShadow,
+      h: hearLine,
+      l: () => ttsOk && save({ readAloud: !settings.readAloud }),
       x: toggleDictation,
       i: () => offer === "intro" && skipIntro(),
       n: () => nextMedia && goNext(),
@@ -866,6 +914,24 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   };
   const cue = cueIdx >= 0 ? cues[cueIdx] : null;
   const english = cue ? cue.en || translations[cueIdx] || "" : "";
+  // Mixed subtitles: the English line, with words the learner is learning or knows swapped in.
+  const mixedOn = settings.subMode === "mixed" && !!cue && !!cue.en;
+  let mixedLine: React.ReactNode = null;
+  if (mixedOn && cue) {
+    const pairs = new Map((mix[cueIdx] || []).map(([j, t]) => [j, t]));
+    mixedLine = cue.en.split(/([\p{L}\p{N}'’]+)/u).map((part, k) => {
+      const ti = k % 2 === 1 ? pairs.get((k - 1) / 2) : undefined;
+      const tok = ti !== undefined ? cue.tokens[ti] : undefined;
+      const status = tok?.lemma ? words.get(tok.lemma) ?? 0 : 0;
+      if (tok && ti !== undefined && (status === 1 || status === 2))
+        return (
+          <span key={k} className={"swap " + wordClass(tok.lemma)} title={part} onClick={(e) => openWord(e, cueIdx, ti)}>
+            {tok.t}
+          </span>
+        );
+      return <span key={k}>{part}</span>;
+    });
+  }
   const visibleCues = useMemo(() => {
     const q = filter.trim().toLowerCase();
     const all = cues.map((c, i) => [c, i] as [Cue, number]);
@@ -916,7 +982,10 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                   ? `The audio is ${spokenName}: you read ${langName} subtitles with the ${spokenName} line underneath, each line timed to the speech. ` +
                     (hasAuto(lang)
                       ? `${langName} subtitles were found.`
-                      : llm
+                      : media.plex && settings.fetchSubs
+                        ? `There are no ${langName} subtitles in the file, so your Plex server is asked to download some` +
+                          (llm ? `; if it finds none, the local model translates the ${spokenName} ones.` : ".")
+                        : llm
                         ? `There are no ${langName} subtitles, so the local model translates the ${spokenName} ones (a few minutes).`
                         : `There are no ${langName} subtitles. Install the local language model in Setup to translate the ${spokenName} ones, or add a ${langName} subtitle file.`)
                   : `${hasAuto(lang) ? `${langName} subtitles were found.` : `No readable ${langName} subtitles were found.`} ${
@@ -948,6 +1017,15 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                   ))}
                 </select>
               </label>
+              {foreignAudio && llm && (
+                <label>
+                  If the local model translates
+                  <select value={style} onChange={(e) => setStyle(e.target.value)}>
+                    <option value="natural">Natural, like real subtitles</option>
+                    <option value="beginner">Beginner: short sentences and common words</option>
+                  </select>
+                </label>
+              )}
               <label className="check">
                 <input type="checkbox" checked={align} disabled={!canListen} onChange={(e) => setAlign(e.target.checked)} />
                 <span>
@@ -1140,7 +1218,16 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         >
           {cue && (
             <div className="cue" key={cueIdx}>
-              <div className="line target" ref={lineRef} style={{ fontSize: settings.subSize }}>
+              {mixedOn && (
+                <div className="line target mixed" style={{ fontSize: settings.subSize }}>
+                  {mixedLine}
+                </div>
+              )}
+              <div
+                className={"line target" + (mixedOn ? " under" : "")}
+                ref={lineRef}
+                style={{ fontSize: mixedOn ? settings.subSize * 0.62 : settings.subSize }}
+              >
                 {cue.tokens.map((tok, i) =>
                   tok.w ? (
                     <span
@@ -1166,7 +1253,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                   ),
                 )}
               </div>
-              {settings.english !== "hide" &&
+              {settings.english !== "hide" && !mixedOn &&
                 (english ? (
                   <div
                     className={"line native" + (settings.english === "blur" && reveal !== cueIdx ? " blur" : "")}
@@ -1204,6 +1291,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 </span>
               ) : (
                 popup.lookup?.entries[0]?.ipa && <span className="ipa">{popup.lookup.entries[0].ipa}</span>
+              )}
+              {ttsOk && (
+                <button className="icon-btn small" title="Hear it" onClick={() => speak(popupText)}>
+                  <Icon name="speak" size={16} />
+                </button>
               )}
               <div className="spacer" />
               <button className="icon-btn small" onClick={closePopup}>
@@ -1321,7 +1413,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                   ? "Word-by-word timing"
                   : "Estimated word timing"}
               {prepared?.target_source === "speech" ? " · subtitles written from the audio" : ""}
-              {prepared?.translated ? ` · ${LANGS[lang] || lang} lines translated by the local model` : ""}
+              {prepared?.translated
+                ? ` · ${LANGS[lang] || lang} lines translated by the local model${prepared.target_source === "translated-simple" ? " (beginner style)" : ""}`
+                : ""}
             </span>
           </div>
           <div className="spacer" />
@@ -1368,7 +1462,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               >
                 English: {settings.english === "show" ? "shown" : settings.english === "blur" ? "blurred" : "hidden"}
               </button>
-              <button className={settings.subMode === "full" ? "chip" : "chip on"} onClick={cycleSubMode} title="How the French line is shown: every word equally, known words dimmed so new ones stand out, or only after the line has been spoken (M)">
+              <button className={settings.subMode === "full" ? "chip" : "chip on"} onClick={cycleSubMode} title={`How the ${LANGS[lang] || lang} line is shown: every word equally, known words dimmed, only after it is spoken, or mixed into the English line (M)`}>
                 Subtitles: {SUB_MODE_LABEL[settings.subMode] || "all words"}
               </button>
               <button className={settings.tenseColors ? "chip on" : "chip"} onClick={() => save({ tenseColors: !settings.tenseColors })} title="Colour verbs by tense (G)">
@@ -1377,6 +1471,15 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               <button className={dictOn ? "chip on" : "chip"} onClick={toggleDictation} title="Dictation: hear each line without subtitles and type what you heard (X)">
                 Dictation
               </button>
+              {ttsOk && (
+                <button
+                  className={settings.readAloud ? "chip on" : "chip"}
+                  onClick={() => save({ readAloud: !settings.readAloud })}
+                  title={`Pause after each line and hear it read in ${LANGS[lang] || lang} (L)`}
+                >
+                  Read aloud
+                </button>
+              )}
             </div>
             <div className="group transport">
               <button className="icon-btn" onClick={prevLine} title="Previous line (A or ←)">
@@ -1394,6 +1497,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               <button className="icon-btn" onClick={startShadow} title="Shadowing: hear the line, then record yourself (R)">
                 <Icon name="mic" />
               </button>
+              {ttsOk && (
+                <button className="icon-btn" onClick={hearLine} title="Hear this line read aloud (H)">
+                  <Icon name="speak" />
+                </button>
+              )}
             </div>
             <div className="group right">
               <select value={baseSpeed} onChange={(e) => changeSpeed(+e.target.value)} title="Speed ([ and ])">

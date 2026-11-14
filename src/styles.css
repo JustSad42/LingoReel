@@ -593,3 +593,17 @@ kbd {
 .thin-bar > div { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.4s var(--ease); }
 .small-empty { padding-top: 8vh; }
 .empty p .icon { vertical-align: -3px; }
+
+/* ---------- mixed subtitles, voice, keep ready ---------- */
+.line.target.mixed .swap {
+  color: var(--accent); font-weight: 700; cursor: pointer; border-radius: 6px; padding: 0 3px; margin: 0 -1px;
+  background: rgba(255, 176, 74, 0.13); transition: background 0.2s;
+}
+.line.target.mixed .swap:hover { background: rgba(255, 176, 74, 0.28); }
+.line.target.under { opacity: 0.8; margin-top: 2px; }
+button.on-toggle { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.kept-badge {
+  position: absolute; top: 8px; left: 8px; z-index: 2; width: 24px; height: 24px; border-radius: 8px; display: grid; place-items: center;
+  background: rgba(12, 12, 18, 0.66); color: var(--accent); border: 1px solid rgba(255, 176, 74, 0.4); backdrop-filter: blur(8px);
+}
+.flash-sentence .icon-btn { vertical-align: middle; margin-left: 6px; }

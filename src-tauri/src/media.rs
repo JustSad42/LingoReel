@@ -60,6 +60,16 @@ pub struct MediaReq {
     pub subs: Vec<SubTrack>,
     #[serde(default)]
     pub audio: Vec<AudioTrack>,
+    /// Where the item lives on Plex, so missing subtitles can be fetched through the server.
+    #[serde(default)]
+    pub plex: Option<PlexRef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PlexRef {
+    pub url: String,
+    pub token: String,
+    pub id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -72,6 +82,9 @@ pub struct PrepareOpts {
     pub native_sub: String,
     /// Listen to the audio to time each word.
     pub align: bool,
+    /// Machine translation style: "natural" or "beginner".
+    #[serde(default)]
+    pub style: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -330,6 +343,84 @@ mod tests {
 }
 
 
+fn fetch_enabled(state: &AppState) -> bool {
+    let db = state.db.lock().unwrap();
+    crate::db::setting(&db, "fetchSubs").as_bool().unwrap_or(true)
+}
+
+fn truthy(v: &Value) -> bool {
+    v.as_bool().unwrap_or(false) || v.as_i64() == Some(1) || v.as_str() == Some("1")
+}
+
+/// Ask the Plex server to search for subtitles in `lang` and download the best match.
+/// Plex adds them to the video as a separate subtitle file, so they also show up in Plex.
+async fn plex_subtitles(state: &AppState, plex: &PlexRef, lang: &str) -> anyhow::Result<Option<SubTrack>> {
+    use std::time::Duration;
+    let base = format!("{}/library/metadata/{}", plex.url.trim_end_matches('/'), plex.id);
+    let get = |url: &str| {
+        state
+            .http
+            .get(url)
+            .header("X-Plex-Token", &plex.token)
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(60))
+    };
+    let found: Value = get(&format!("{base}/subtitles"))
+        .query(&[("language", lang), ("hearingImpaired", "3"), ("forced", "3")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let results = found["MediaContainer"]["Stream"].as_array().cloned().unwrap_or_default();
+    let best = results.iter().filter(|s| s["key"].is_string()).max_by_key(|s| {
+        let tag = s["languageTag"].as_str().or(s["languageCode"].as_str()).unwrap_or("");
+        let title = format!("{} {}", s["displayTitle"].as_str().unwrap_or(""), s["title"].as_str().unwrap_or(""));
+        (variant_score(lang, tag, &title), truthy(&s["perfectMatch"]) as i32, s["score"].as_i64().unwrap_or(0))
+    });
+    let Some(best) = best else { return Ok(None) };
+    let chosen = best["key"].as_str().unwrap_or_default().to_string();
+    state
+        .http
+        .put(format!("{base}/subtitles"))
+        .query(&[("key", chosen.as_str())])
+        .header("X-Plex-Token", &plex.token)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await?
+        .error_for_status()?;
+    // Plex downloads in the background; wait for the file to appear on the video.
+    for _ in 0..45 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let md: Value = get(&base).send().await?.error_for_status()?.json().await?;
+        let streams = md["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
+        for st in streams {
+            let tag = st["languageTag"].as_str().or(st["languageCode"].as_str()).unwrap_or("").to_string();
+            let (Some(path), true) = (st["key"].as_str(), st["streamType"].as_i64() == Some(3)) else { continue };
+            let track = SubTrack {
+                id: format!("p{}", st["id"]),
+                lang: tag.clone(),
+                codec: st["codec"].as_str().unwrap_or("srt").to_string(),
+                title: st["displayTitle"].as_str().unwrap_or("").to_string(),
+                forced: false,
+                index: None,
+                url: Some(format!(
+                    "{}{}{}X-Plex-Token={}",
+                    plex.url.trim_end_matches('/'),
+                    path,
+                    if path.contains('?') { "&" } else { "?" },
+                    plex.token
+                )),
+                path: None,
+            };
+            if lang2(&tag) == lang && is_text(&track) {
+                return Ok(Some(track));
+            }
+        }
+    }
+    bail!("the download did not finish in time")
+}
+
 /// Tokenise every cue (with the dictionary, when it is installed).
 fn tokenise(state: &AppState, lang: &str, cues: &mut [Cue]) -> anyhow::Result<()> {
     if components::locate(state, &format!("dict-{lang}")).is_some() {
@@ -507,6 +598,8 @@ async fn prepare_in(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Pr
 
     let mut heard: Vec<Heard> = vec![];
     if listen {
+        // Speech recognition needs the graphics memory; the translation model reloads later if needed.
+        llm::unload(state).await;
         emit(app, key, "listen", 0.0, "Listening to the audio");
         let app2 = app.clone();
         let key2 = key.to_string();
@@ -582,7 +675,26 @@ async fn prepare_foreign(
     let key = req.key.as_str();
     let (target_name, spoken_name) = (llm::lang_name(&opts.target_lang), llm::lang_name(spoken));
     let force_translate = matches!(opts.target_sub.as_str(), "translate" | "whisper");
-    let target = if force_translate { None } else { pick_sub(&req.subs, &opts.target_lang, &opts.target_sub) };
+    let mut target = if force_translate { None } else { pick_sub(&req.subs, &opts.target_lang, &opts.target_sub) };
+    // Real subtitles beat a machine translation: ask the Plex server to find some (OpenSubtitles).
+    let mut fetched: Option<SubTrack> = None;
+    let mut fetch_note = String::new();
+    if target.is_none() && !force_translate && opts.target_sub == "auto" {
+        if let Some(px) = req.plex.as_ref().filter(|_| fetch_enabled(state)) {
+            emit(app, key, "subtitles", 0.0, &format!("Looking for {target_name} subtitles through Plex"));
+            match plex_subtitles(state, px, &opts.target_lang).await {
+                Ok(Some(t)) => {
+                    fetch_note = format!(" The {target_name} subtitles were downloaded through your Plex server.");
+                    fetched = Some(t);
+                }
+                Ok(None) => fetch_note = format!(" Plex found no {target_name} subtitles for this video."),
+                Err(e) => fetch_note = format!(" Plex could not fetch {target_name} subtitles ({e:#})."),
+            }
+        }
+    }
+    if fetched.is_some() {
+        target = fetched.as_ref();
+    }
     let native = if opts.native_sub == "none" { None } else { pick_sub(&req.subs, &opts.native_lang, &opts.native_sub) };
     // Lines in the spoken language: the source for timing, and for translation.
     let source = native.or_else(|| pick_sub(&req.subs, spoken, "auto"));
@@ -618,6 +730,8 @@ async fn prepare_foreign(
 
     let mut heard: Vec<Heard> = vec![];
     if listen {
+        // Speech recognition needs the graphics memory; the translation model reloads later if needed.
+        llm::unload(state).await;
         emit(app, key, "listen", 0.0, "Listening to the audio");
         let app2 = app.clone();
         let key2 = key.to_string();
@@ -665,7 +779,7 @@ async fn prepare_foreign(
         emit(app, key, "translate", 0.0, &message);
         let app2 = app.clone();
         let key2 = key.to_string();
-        let out = llm::translate_lines(state, spoken, &opts.target_lang, &lines, move |p| {
+        let out = llm::translate_lines(state, spoken, &opts.target_lang, &lines, &opts.style, move |p| {
             emit(&app2, &key2, "translate", p, &message)
         })
         .await?;
@@ -676,12 +790,13 @@ async fn prepare_foreign(
             .map(|(c, t)| Cue { start: c.start, end: c.end, text: t.trim().to_string(), ..Default::default() })
             .collect();
         translated = true;
-        target_source = "translated";
+        target_source = if opts.style == "beginner" { "translated-simple" } else { "translated" };
         note.push_str(&format!(
             " The {target_name} lines were translated from the {spoken_name} by the local model and can contain mistakes."
         ));
     }
 
+    note.push_str(&fetch_note);
     tokenise(state, &opts.target_lang, &mut cues)?;
     cues.iter_mut().for_each(subs::spread_tokens);
     // The second line shows the spoken language when that is the learner's own language.

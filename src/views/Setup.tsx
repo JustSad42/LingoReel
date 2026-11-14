@@ -134,6 +134,15 @@ export default function Setup({ onDone }: { onDone: () => void }) {
         comps.filter((c) => llm.includes(c.id)),
         allBtn(missing((c) => llm.includes(c.id)), "Download both"),
       )}
+      {comps.some((c) => c.id === "piper") &&
+        group(
+          "Reading aloud (optional)",
+          comps.some((c) => c.id.startsWith("voice-"))
+            ? "An offline voice that reads words, lines and review cards aloud. Most useful for films in English, where you never hear the lines you read."
+            : "An offline voice that reads words and lines aloud. There is no voice yet for the language you are learning.",
+          comps.filter((c) => c.id === "piper" || c.id.startsWith("voice-")),
+          allBtn(missing((c) => c.id === "piper" || c.id.startsWith("voice-")), "Download both"),
+        )}
       <div className="row end">
         <button
           className="primary"

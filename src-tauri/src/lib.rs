@@ -5,7 +5,9 @@ mod db;
 mod dict;
 mod llm;
 mod media;
+mod mix;
 mod mpv;
+mod speech;
 mod queue;
 mod srs;
 mod subs;
@@ -116,6 +118,9 @@ pub fn run() {
             llm::llm_stop,
             llm::shadow_score,
             llm::http_json,
+            speech::tts_ready,
+            speech::tts_speak,
+            mix::media_mix,
             queue::queue_add,
             queue::queue_list,
             queue::queue_remove,
