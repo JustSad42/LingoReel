@@ -112,7 +112,8 @@ pub const VOICES: &[(&str, &str, &str)] = &[
     ("pt", "pt/pt_BR/faber/medium", "pt_BR-faber-medium"),
 ];
 const PIPER_URL: &str = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
-const VOICE_BASE: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main";
+// Pinned: voices retrained for newer Piper versions use sound codes this engine cannot read.
+const VOICE_BASE: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0";
 
 fn voice(id: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
     let code = id.strip_prefix("voice-")?;
