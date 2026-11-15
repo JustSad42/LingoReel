@@ -5,7 +5,11 @@ import { api, LANGS, LEARN_LANGS } from "../api";
 import { useApp } from "../App";
 
 export default function SettingsView() {
-  const { settings, save, toast } = useApp();
+  const { settings, save, toast, showTour, showChanges } = useApp();
+  const [comps, setComps] = useState<string[]>([]);
+  useEffect(() => {
+    api.components().then((c) => setComps(c.filter((x) => x.installed).map((x) => x.id)));
+  }, []);
   const [info, setInfo] = useState({ version: "", dataDir: "", nvidia: false });
   const [checking, setChecking] = useState(false);
 
@@ -31,7 +35,7 @@ export default function SettingsView() {
 
   const langName = LANGS[settings.targetLang] || settings.targetLang;
   const toggle = (
-    key: "autoPause" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors" | "prepareNext" | "fetchSubs" | "ttsSlow" | "readAloud",
+    key: "autoPause" | "pauseLearning" | "genderColors" | "subOutline" | "pauseOnHover" | "slowUnknown" | "align" | "colorWords" | "tenseColors" | "prepareNext" | "fetchSubs" | "ttsSlow" | "readAloud",
     label: string,
     hint: string,
   ) => (
@@ -52,6 +56,7 @@ export default function SettingsView() {
         <h2>Watching</h2>
         {toggle("pauseOnHover", "Pause when the mouse is over the subtitles", "so you can read and click words without rushing")}
         {toggle("autoPause", "Pause after every line", "press Space to continue; useful for careful study")}
+        {!settings.autoPause && toggle("pauseLearning", "Pause after lines with a word I am learning", "a lighter version of auto-pause (P cycles between them)")}
         {toggle("slowUnknown", "Slow down lines with words you do not know", "plays those lines at the speed below")}
         <label>
           Slow speed: {settings.slowSpeed}×
@@ -59,6 +64,7 @@ export default function SettingsView() {
         </label>
         {toggle("colorWords", "Underline words by how well you know them", "orange is new, yellow is learning, plain is known")}
         {toggle("tenseColors", "Colour verbs by tense", "each tense gets its own colour")}
+        {toggle("genderColors", "Colour nouns by gender", "blue for masculine, pink for feminine, green for neuter (C)")}
         <label>
           {langName} line
           <select value={settings.subMode} onChange={(e) => save({ subMode: e.target.value })}>
@@ -91,6 +97,28 @@ export default function SettingsView() {
           Subtitle size: {settings.subSize}px
           <input type="range" min={20} max={60} step={1} value={settings.subSize} onChange={(e) => save({ subSize: +e.target.value })} />
         </label>
+        <div className="sub-preview" style={{ "--lift": settings.subLift + "px", "--subbg": settings.subBg / 100 } as React.CSSProperties}>
+          <div className={"subs-sample font-" + settings.subFont + (settings.subOutline ? " outlined" : "")}>
+            <span className="line target">Je suis <span className="w gen-f">en train de</span> regarder</span>
+          </div>
+        </div>
+        <label>
+          Subtitle height: {settings.subLift > 0 ? `${settings.subLift}px higher` : settings.subLift < 0 ? `${-settings.subLift}px lower` : "standard"}
+          <input type="range" min={-120} max={420} step={8} value={settings.subLift} onChange={(e) => save({ subLift: +e.target.value })} />
+        </label>
+        <label>
+          Box behind subtitles: {settings.subBg}%
+          <input type="range" min={0} max={100} step={5} value={settings.subBg} onChange={(e) => save({ subBg: +e.target.value })} />
+        </label>
+        <label>
+          Subtitle font
+          <select value={settings.subFont} onChange={(e) => save({ subFont: e.target.value })}>
+            <option value="sans">Segoe UI (default)</option>
+            <option value="serif">Georgia (serif, like printed subtitles)</option>
+            <option value="bahn">Bahnschrift (narrow, very legible)</option>
+          </select>
+        </label>
+        {toggle("subOutline", "Outline the letters", "black edge around each letter; reads well with the box turned down")}
         {toggle("prepareNext", "Prepare the next episode while I watch", "so it is ready to study the moment the current one ends")}
         {toggle("align", "Time every word from the audio by default", "applies when preparing a video; needs speech recognition from Setup")}
       </section>
@@ -114,6 +142,19 @@ export default function SettingsView() {
         </label>
         {toggle("readAloud", `Read each ${langName} line aloud`, "pauses after every line and reads it with the offline voice from Setup (L)")}
         {toggle("ttsSlow", "Read aloud slowly", "for words, lines and review cards")}
+      </section>
+
+      <section className="card">
+        <h2>Review</h2>
+        <label>
+          Card style
+          <select value={settings.reviewStyle} onChange={(e) => save({ reviewStyle: e.target.value })}>
+            <option value="classic">Classic: see the line, recall the meaning</option>
+            <option value="cloze">Fill in: type the missing word in the line</option>
+            <option value="listen">Listening: hear the line first, then read it</option>
+            <option value="mixed">Mix all three</option>
+          </select>
+        </label>
       </section>
 
       <section className="card">
@@ -181,6 +222,15 @@ export default function SettingsView() {
           its local address instead. Explanations never use a cloud service.
         </p>
         <label>
+          Model
+          <select value={settings.llmSize} onChange={(e) => save({ llmSize: e.target.value })}>
+            <option value="standard">Standard: Gemma 3 4B, needs about 4 GB of graphics memory</option>
+            <option value="large" disabled={!comps.includes("llm-model-large")}>
+              Better: Gemma 3 12B, needs about 9 GB{comps.includes("llm-model-large") ? "" : " (download it in Setup first)"}
+            </option>
+          </select>
+        </label>
+        <label>
           Local endpoint (optional)
           <input placeholder="http://localhost:11434/v1" value={settings.llmUrl} onChange={(e) => save({ llmUrl: e.target.value })} />
         </label>
@@ -197,6 +247,14 @@ export default function SettingsView() {
           <div className="spacer" />
           <button className="small" disabled={checking} onClick={checkUpdate}>
             {checking ? "Checking…" : "Check for updates"}
+          </button>
+        </div>
+        <div className="row">
+          <button className="small" onClick={showChanges}>
+            What's new
+          </button>
+          <button className="small" onClick={showTour}>
+            Show the tour again
           </button>
         </div>
         <p className="muted">Your data is stored in {info.dataDir}</p>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, FileEntry, fmtTime, MediaReq, MediaStats, plex, PlexConn } from "../api";
+import { api, FileEntry, fmtTime, MediaReq, MediaStats, Overview, plex, PlexConn } from "../api";
 import { enqueue, overall, useQueue } from "../queue";
 import { KEEP_AHEAD } from "../keepReady";
 import { useApp } from "../App";
@@ -85,6 +85,7 @@ export default function Library({ active }: { active: boolean }) {
   const [summaries, setSummaries] = useState<Record<string, MediaStats>>({});
   const [progress, setProgress] = useState<Map<string, [number, number]>>(new Map());
   const [linking, setLinking] = useState(false);
+  const [overview, setOverview] = useState<Overview[]>([]);
   const queue = useQueue();
   const queued = useMemo(() => new Map(queue.items.map((i) => [i.key, i])), [queue]);
 
@@ -93,7 +94,20 @@ export default function Library({ active }: { active: boolean }) {
     if (!active) return;
     api.progressAll().then((rows) => setProgress(new Map(rows.map(([k, pos, dur]) => [k, [pos, dur]]))));
     refreshSummaries();
-  }, [active]);
+    api.overview(settings.targetLang).then(setOverview).catch(() => setOverview([]));
+  }, [active, settings.targetLang]);
+
+  // Prepared videos you have not finished where you already know most words: the best next step.
+  const forLevel = useMemo(() => {
+    const unwatched = overview.filter((o) => {
+      const pr = progress.get(o.key);
+      return !pr || !pr[1] || pr[0] / pr[1] < 0.85;
+    });
+    return unwatched
+      .filter((o) => o.known >= 70 && o.known <= 99 && (o.key.startsWith("plex-") ? !!p : !/^https?:/.test(o.url)))
+      .sort((a, b) => Math.abs(a.known - 92) - Math.abs(b.known - 92))
+      .slice(0, 6);
+  }, [overview, progress, p]);
 
   useEffect(() => {
     if (!p) {
@@ -272,6 +286,7 @@ export default function Library({ active }: { active: boolean }) {
       .then(play)
       .catch((e) => toast(String(e)));
 
+  const playOverview = (o: Overview) => (o.key.startsWith("plex-") ? playPlex(o.key.slice(5)) : playFile(o.url));
   const q = query.trim().toLowerCase();
   const filtered = q ? items.filter((i) => String(i.title).toLowerCase().includes(q)) : items;
   const seasons = useMemo(() => {
@@ -432,6 +447,30 @@ export default function Library({ active }: { active: boolean }) {
               </button>
             )}
           </div>
+        )}
+        {source && !show && !q && forLevel.length > 0 && (
+          <section className="for-level">
+            <div className="for-level-head">
+              <h2>For your level</h2>
+              <span className="muted">Prepared videos where you already know most of the words</span>
+            </div>
+            <div className="for-level-row">
+              {forLevel.map((o) => (
+                <button key={o.key} className="level-card" onClick={() => playOverview(o)} title={o.title}>
+                  <div className="level-ring" style={{ "--pct": o.known + "%" } as React.CSSProperties}>
+                    <span>{Math.round(o.known)}%</span>
+                  </div>
+                  <div className="level-text">
+                    <strong>{o.title}</strong>
+                    <span className="muted">
+                      {o.known >= 95 ? "Comfortable" : o.known >= 88 ? "Just right" : "A stretch"} · {o.unique} different words
+                    </span>
+                  </div>
+                  <Icon name="play" size={16} />
+                </button>
+              ))}
+            </div>
+          </section>
         )}
         {loading && (
           <div className="grid">

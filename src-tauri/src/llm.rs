@@ -18,6 +18,27 @@ use tauri::State;
 pub struct Server {
     child: tokio::process::Child,
     port: u16,
+    model: std::path::PathBuf,
+}
+
+/// The model file to run: the larger one when installed and chosen in Settings.
+fn model_file(state: &AppState) -> anyhow::Result<std::path::PathBuf> {
+    let large = {
+        let db = state.db.lock().unwrap();
+        db::setting(&db, "llmSize").as_str() == Some("large")
+    };
+    if large {
+        if let Some(p) = components::locate(state, "llm-model-large") {
+            return Ok(p);
+        }
+    }
+    components::locate(state, "llm-model")
+        .or_else(|| components::locate(state, "llm-model-large"))
+        .ok_or_else(|| anyhow!("The explanation model is not installed. Open Setup to download it."))
+}
+
+fn has_model(state: &AppState) -> bool {
+    components::locate(state, "llm-model").is_some() || components::locate(state, "llm-model-large").is_some()
 }
 
 impl Server {
@@ -41,12 +62,12 @@ pub struct LlmStatus {
 
 #[tauri::command]
 pub fn llm_status(state: State<AppState>) -> LlmStatus {
-    let managed = components::locate(&state, "llama").is_some() && components::locate(&state, "llm-model").is_some();
+    let managed = components::locate(&state, "llama").is_some() && has_model(&state);
     LlmStatus { available: managed || custom_endpoint(&state).is_some(), managed }
 }
 
 pub fn available(state: &AppState) -> bool {
-    (components::locate(state, "llama").is_some() && components::locate(state, "llm-model").is_some())
+    (components::locate(state, "llama").is_some() && has_model(state))
         || custom_endpoint(state).is_some()
 }
 
@@ -55,14 +76,16 @@ async fn endpoint(state: &AppState) -> anyhow::Result<(String, String)> {
     if let Some(custom) = custom_endpoint(state) {
         return Ok(custom);
     }
+    let model = model_file(state)?;
     let mut guard = state.llm.lock().await;
     if let Some(s) = guard.as_mut() {
-        if matches!(s.child.try_wait(), Ok(None)) {
+        if matches!(s.child.try_wait(), Ok(None)) && s.model == model {
             return Ok((format!("http://127.0.0.1:{}/v1", s.port), String::new()));
         }
+        // A different model was chosen: start over with that one.
+        s.kill();
     }
     let exe = components::require(state, "llama")?;
-    let model = components::require(state, "llm-model")?;
     let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let child = cmd(&exe)
         .current_dir(exe.parent().unwrap())
@@ -72,7 +95,7 @@ async fn endpoint(state: &AppState) -> anyhow::Result<(String, String)> {
         .stderr(Stdio::null())
         .spawn()
         .context("starting the local LLM")?;
-    *guard = Some(Server { child, port });
+    *guard = Some(Server { child, port, model });
     // Loading a few GB of weights takes a while the first time.
     for _ in 0..240 {
         tokio::time::sleep(Duration::from_millis(500)).await;

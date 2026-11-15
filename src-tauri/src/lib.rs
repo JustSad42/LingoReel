@@ -8,6 +8,7 @@ mod media;
 mod mix;
 mod mpv;
 mod speech;
+mod study;
 mod queue;
 mod srs;
 mod subs;
@@ -61,6 +62,9 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             let _ = std::fs::remove_dir_all(dir.join("tmp"));
             let db = db::open(&dir)?;
+            if let Ok(raw) = db.query_row("SELECT v FROM settings WHERE k='settings'", [], |r| r.get::<_, String>(0)) {
+                components::set_light_from(&serde_json::from_str(&raw).unwrap_or_default());
+            }
             app.manage(AppState {
                 dir,
                 db: Mutex::new(db),
@@ -121,6 +125,11 @@ pub fn run() {
             speech::tts_ready,
             speech::tts_speak,
             mix::media_mix,
+            study::media_extras,
+            study::dict_family,
+            study::dict_conjugate,
+            study::tense_examples,
+            study::media_overview,
             queue::queue_add,
             queue::queue_list,
             queue::queue_remove,

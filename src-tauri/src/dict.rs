@@ -36,6 +36,37 @@ pub struct Lookup {
     pub entries: Vec<Entry>,
 }
 
+#[derive(Serialize)]
+pub struct ConjRow {
+    /// "pres", "pc", "imp", "ps", "fut", "cond", "subj", "subj-imp", "imper".
+    pub code: String,
+    /// I, you, he/she, we, you (plural), they.
+    pub cells: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct Conjugation {
+    pub lemma: String,
+    pub rows: Vec<ConjRow>,
+    pub participle: String,
+    pub gerund: String,
+}
+
+/// Usage labels for senses that should not be offered first: regional, slang, archaic and so on.
+const SKIP_LABELS: &[&str] = &[
+    "belgium", "quebec", "canada", "switzerland", "africa", "louisiana", "france, ", "latin america", "mexico", "argentina",
+    "chile", "colombia", "cuba", "peru", "venezuela", "caribbean", "central america", "rioplatense", "slang", "vulgar",
+    "dated", "archaic", "obsolete", "rare", "dialect", "regional", "euphemistic", "nonstandard", "proscribed", "humorous",
+    "pejorative", "offensive", "nautical", "military", "historical", "jargon", "verlan", "colloquial", "middle ages",
+];
+
+/// French verbs that build the passé composé with être.
+const FR_ETRE: &[&str] = &[
+    "aller", "venir", "arriver", "partir", "entrer", "sortir", "naître", "mourir", "rester", "tomber", "monter", "descendre",
+    "retourner", "devenir", "revenir", "rentrer", "apparaître", "décéder", "parvenir", "survenir", "intervenir", "repartir",
+    "ressortir", "redevenir",
+];
+
 pub struct Dict {
     db: Connection,
     lang: String,
@@ -105,10 +136,254 @@ impl Dict {
             .unwrap_or_default()
     }
 
-    fn is_verb(&self, norm: &str) -> bool {
+    pub fn is_verb(&self, norm: &str) -> bool {
         self.db
             .query_row("SELECT 1 FROM entry WHERE norm=?1 AND pos='verb' LIMIT 1", [norm], |_| Ok(()))
             .is_ok()
+    }
+
+    /// Meaning of a set phrase ("en train de", "tout à fait"), if the dictionary has it.
+    /// Regional, slang and archaic senses are skipped, so "et des" is not flagged as Belgian slang.
+    pub fn phrase_gloss(&self, norm: &str) -> Option<String> {
+        if !norm.contains(' ') {
+            return None;
+        }
+        let mut st = self
+            .db
+            .prepare_cached(
+                "SELECT glosses FROM entry WHERE norm=?1 AND pos IN \
+                 ('verb','adv','adj','noun','phrase','intj','prep','prep_phrase','conj','proverb') ORDER BY id",
+            )
+            .ok()?;
+        let rows: Vec<String> = st.query_map([norm], |r| r.get(0)).ok()?.flatten().collect();
+        for raw in rows {
+            let Ok(glosses) = serde_json::from_str::<Vec<String>>(&raw) else { continue };
+            for g in glosses {
+                let lower = g.to_lowercase();
+                if lower.starts_with('(') {
+                    let label = lower[1..].split(')').next().unwrap_or("");
+                    if SKIP_LABELS.iter().any(|l| label.contains(l)) {
+                        continue;
+                    }
+                }
+                if lower.contains("sexual") || lower.starts_with("alternative") || lower.contains(" form of ") || lower.contains("spelling of") {
+                    continue;
+                }
+                // "at home (at one's home)" -> "at home"
+                let mut text = g.trim().to_string();
+                if text.ends_with(')') && !text.starts_with('(') {
+                    if let Some(i) = text.rfind(" (") {
+                        text.truncate(i);
+                    }
+                }
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        None
+    }
+
+    /// Grammatical gender of a noun: "m", "f" or "n".
+    pub fn noun_gender(&self, norm: &str) -> Option<&'static str> {
+        // Only words whose main entry is a noun: "tous" also has a rare noun sense, but is not one here.
+        let (pos, g): (String, String) = self
+            .db
+            .query_row("SELECT pos, gender FROM entry WHERE norm=?1 AND pos NOT IN ('name','proper noun') ORDER BY id LIMIT 1", [norm], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .ok()?;
+        if pos != "noun" {
+            return None;
+        }
+        match g.as_str() {
+            "m" => Some("m"),
+            "f" => Some("f"),
+            "n" => Some("n"),
+            _ => None,
+        }
+    }
+
+    /// Words built on the same root, most common first: (word, part of speech, first meaning).
+    pub fn family(&self, lemma: &str) -> Vec<(String, String, String)> {
+        const ENDINGS: &[&str] = &[
+            "ation", "ción", "sión", "zione", "ção", "mente", "ment", "eur", "euse", "dor", "dora", "ier", "ière", "ero", "era",
+            "er", "ir", "re", "ar", "or", "en", "o", "a", "e",
+        ];
+        // A short stem matches unrelated words ("école" -> "écologique"), so only verbs may use 4 letters.
+        let min = if self.is_verb(lemma) { 4 } else { 5 };
+        let mut stem = lemma.to_string();
+        for end in ENDINGS {
+            if let Some(s) = lemma.strip_suffix(end) {
+                if s.chars().count() >= min {
+                    stem = s.to_string();
+                    break;
+                }
+            }
+        }
+        if stem.chars().count() < min {
+            return vec![];
+        }
+        let max_len = stem.chars().count() + 8;
+        // Related words should share some meaning too: "chanteur" (singer) and "chanter" (to sing) do,
+        // "chantier" (building site) does not. Compare the first four letters of the English words.
+        const FILLER: &[&str] = &["that", "this", "with", "from", "which", "some", "someone", "something", "person", "thing", "other", "being", "having", "make", "very", "used", "into", "more", "about", "their", "also"];
+        let roots = |text: &str| -> Vec<String> {
+            text.to_lowercase()
+                .split(|c: char| !c.is_alphabetic())
+                .filter(|w| w.len() >= 4 && !FILLER.contains(w))
+                .map(|w| w.chars().take(4).collect())
+                .collect()
+        };
+        let own: std::collections::HashSet<String> = self.glosses(lemma).iter().flat_map(|g| roots(g)).collect();
+        let mut st = match self.db.prepare_cached(
+            "SELECT e.norm, e.pos, e.glosses FROM entry e LEFT JOIN freq f ON f.norm = e.norm \
+             WHERE e.norm LIKE ?1 AND e.norm <> ?2 AND e.norm NOT LIKE '% %' AND e.pos NOT IN ('name','proper noun','character') \
+             GROUP BY e.norm ORDER BY COALESCE(MIN(f.rank), 999999) LIMIT 40",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let rows = st.query_map(rusqlite::params![format!("{stem}%"), lemma], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        });
+        let Ok(rows) = rows else { return vec![] };
+        rows.flatten()
+            .filter(|(w, _, _)| w.chars().count() <= max_len)
+            // Inflected forms (plurals, conjugations) are not separate family members.
+            .filter(|(w, _, _)| !self.forms(w).iter().any(|(l, _)| norm(l) == lemma))
+            .filter_map(|(w, pos, g)| {
+                let first = serde_json::from_str::<Vec<String>>(&g).ok()?.into_iter().find(|x| {
+                    let l = x.to_lowercase();
+                    let label = l.strip_prefix('(').and_then(|r| r.split(')').next()).unwrap_or("");
+                    !l.starts_with("plural of") && !l.contains(" of ") && !SKIP_LABELS.iter().any(|k| label.contains(k))
+                })?;
+                let all = serde_json::from_str::<Vec<String>>(&g).ok()?.join(" ");
+                if !own.is_empty() && !roots(&all).iter().any(|r| own.contains(r)) {
+                    return None;
+                }
+                Some((w, pos, first))
+            })
+            .take(6)
+            .collect()
+    }
+
+    /// Conjugation table assembled from the dictionary's inflected forms.
+    pub fn conjugation(&self, lemma: &str) -> Option<Conjugation> {
+        if !self.is_verb(lemma) {
+            return None;
+        }
+        let mut st = self.db.prepare_cached("SELECT norm, tags FROM form WHERE lemma=?1").ok()?;
+        let forms: Vec<(String, String)> = st
+            .query_map([lemma], |r| Ok((r.get(0)?, r.get(1)?)))
+            .ok()?
+            .flatten()
+            .collect();
+        const SKIP: &[&str] = &[
+            "archaic", "obsolete", "combined-form", "object-", "with-voseo", "with-vos", "voseo", "reflexive", "formal",
+            "negative", "dialectal", "rare", "semantically", "accusative", "dative", "imperfect-se", "alternative",
+        ];
+        const ROWS: &[&str] = &["pres", "imp", "ps", "fut", "cond", "subj", "subj-imp", "imper"];
+        let mut table: HashMap<&str, Vec<String>> = ROWS.iter().map(|r| (*r, vec![String::new(); 6])).collect();
+        let (mut participle, mut gerund) = (String::new(), String::new());
+        for (form, tags) in &forms {
+            // Some entries carry a pronunciation instead of a spelling.
+            if form.chars().any(|c| ('\u{0250}'..='\u{02AF}').contains(&c) || matches!(c, '\'' | '’' | '-' | ' ')) || SKIP.iter().any(|s| tags.contains(s)) {
+                continue;
+            }
+            let has = |k: &str| tags.split_whitespace().any(|t| t == k);
+            if has("participle") && has("past") {
+                if participle.is_empty() || (has("masculine") && has("singular")) {
+                    participle = form.clone();
+                }
+                continue;
+            }
+            if has("gerund") || (has("participle") && has("present")) {
+                if gerund.is_empty() || form.chars().count() < gerund.chars().count() {
+                    gerund = form.clone();
+                }
+                continue;
+            }
+            let subj = has("subjunctive");
+            let rows: Vec<&str> = [
+                ("imper", has("imperative")),
+                ("subj", subj && has("present")),
+                ("subj-imp", subj && has("imperfect")),
+                ("cond", has("conditional")),
+                ("fut", has("future") && !subj),
+                ("ps", (has("historic") || has("preterite")) && !subj),
+                ("imp", has("imperfect") && !subj),
+                ("pres", has("present") && !subj && !has("imperative")),
+            ]
+            .into_iter()
+            .filter(|(_, ok)| *ok)
+            .map(|(r, _)| r)
+            .collect();
+            let (sg, pl) = (has("singular"), has("plural"));
+            for (i, p) in ["first-person", "second-person", "third-person"].iter().enumerate() {
+                if !has(p) {
+                    continue;
+                }
+                for slot in [sg.then_some(i), pl.then_some(i + 3)].into_iter().flatten() {
+                    for r in &rows {
+                        let cells = table.get_mut(r).unwrap();
+                        let se = |f: &str| ["se", "ses", "semos", "seis", "sen"].iter().any(|e| f.ends_with(e));
+                        if cells[slot].is_empty() || (*r == "subj-imp" && self.lang == "es" && se(&cells[slot]) && !se(form)) {
+                            cells[slot] = form.clone();
+                        }
+                    }
+                }
+            }
+        }
+        if participle.is_empty() && self.lang == "fr" {
+            if let Some(stem) = lemma.strip_suffix("er") {
+                participle = format!("{stem}é");
+            } else if let Some(stem) = lemma.strip_suffix("ir") {
+                participle = format!("{stem}i");
+            }
+        }
+        if self.lang == "es" {
+            // Usted and nosotros commands are the present subjunctive; vosotros drops the r for d.
+            let subj = table.get("subj").cloned().unwrap_or_default();
+            if let Some(imper) = table.get_mut("imper") {
+                for i in [2, 3, 5] {
+                    if !subj[i].is_empty() {
+                        imper[i] = subj[i].clone();
+                    }
+                }
+                if let Some(stem) = lemma.strip_suffix('r') {
+                    imper[4] = format!("{stem}d");
+                }
+            }
+        }
+        let mut rows: Vec<ConjRow> = ROWS
+            .iter()
+            .map(|r| ConjRow { code: r.to_string(), cells: table.remove(r).unwrap_or_default() })
+            .filter(|r| r.cells.iter().any(|c| !c.is_empty()))
+            .collect();
+        // The everyday past: auxiliary in the present plus the past participle.
+        let aux = match self.lang.as_str() {
+            "fr" if FR_ETRE.contains(&lemma) => Some("être"),
+            "fr" => Some("avoir"),
+            "es" => Some("haber"),
+            _ => None,
+        };
+        if let (Some(aux), false) = (aux, participle.is_empty()) {
+            if aux != lemma {
+                let present: [&str; 6] = match aux {
+                    "être" => ["suis", "es", "est", "sommes", "êtes", "sont"],
+                    "avoir" => ["ai", "as", "a", "avons", "avez", "ont"],
+                    _ => ["he", "has", "ha", "hemos", "habéis", "han"],
+                };
+                let cells = present
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| if aux == "être" && i >= 3 { format!("{c} {participle}s") } else { format!("{c} {participle}") })
+                    .collect();
+                rows.insert(1.min(rows.len()), ConjRow { code: "pc".into(), cells });
+            }
+        }
+        Some(Conjugation { lemma: lemma.to_string(), rows, participle, gerund })
     }
 
     /// Tenses the surface form can be, as a form of `lemma` ("pres", "imp", "pp", ...).
@@ -334,4 +609,38 @@ pub fn dict_phrase(state: State<AppState>, lang: String, phrase: String) -> Res<
 #[tauri::command]
 pub fn dict_top_lemmas(state: State<AppState>, lang: String, count: usize) -> Res<Vec<String>> {
     Ok(with_dict(&state, &lang, |d| d.top_lemmas(count))?)
+}
+
+#[cfg(test)]
+mod real_dict {
+    use super::*;
+
+    /// Runs against an installed dictionary: LINGOREEL_DICT=path\dict-fr.sqlite cargo test real_dict -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn study_helpers() {
+        let path = std::env::var("LINGOREEL_DICT").unwrap();
+        let lang = if path.contains("-es") { "es" } else { "fr" };
+        let d = Dict::open(Path::new(&path), lang).unwrap();
+        let verbs: &[&str] = if lang == "fr" { &["parler", "aller", "finir", "être", "avoir", "prendre"] } else { &["hablar", "ir", "tener", "ser", "vivir"] };
+        for v in verbs {
+            let c = d.conjugation(v).unwrap();
+            println!("== {v} pp={} ger={}", c.participle, c.gerund);
+            for r in &c.rows {
+                println!("  {:9} {}", r.code, r.cells.join(" | "));
+            }
+        }
+        let fam: &[&str] = if lang == "fr" { &["parler", "chanter", "maison", "travailler", "école", "chanteur", "regarder"] } else { &["hablar", "trabajar", "casa"] };
+        for w in fam {
+            println!("family {w}: {:?}", d.family(w));
+        }
+        let ph: &[&str] = if lang == "fr" { &["en train de", "tout à fait", "il y a", "et des", "pas de", "première fois", "à la maison", "de nos jours"] } else { &["sin embargo", "a lo mejor", "por fin", "darse cuenta"] };
+        for p in ph {
+            println!("phrase {p}: {:?}", d.phrase_gloss(&norm(p)));
+        }
+        let ns: &[&str] = if lang == "fr" { &["maison", "livre", "voiture", "chat"] } else { &["casa", "libro", "coche", "agua"] };
+        for n in ns {
+            println!("gender {n}: {:?}", d.noun_gender(n));
+        }
+    }
 }

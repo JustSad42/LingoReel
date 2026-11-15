@@ -34,6 +34,17 @@ struct Spec {
     required: bool,
 }
 
+/// Light setup: the small speech model even on a PC with a graphics card.
+pub static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn light() -> bool {
+    LIGHT.load(std::sync::atomic::Ordering::Relaxed) || gpu() == Gpu::None
+}
+
+pub fn set_light_from(settings: &serde_json::Value) {
+    LIGHT.store(settings["whisperSize"].as_str() == Some("small"), std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn has_nvidia() -> bool {
     on_path("nvidia-smi.exe").is_some() || Path::new(r"C:\Windows\System32\nvidia-smi.exe").exists()
 }
@@ -130,7 +141,7 @@ struct DictSpec {
 
 fn specs() -> Vec<Spec> {
     let card = gpu();
-    let gpu = card != Gpu::None;
+    let gpu = !light();
     vec![
         Spec { id: "mpv", name: "Video player engine (mpv)", about: "Plays every video format, including the ones on your server.", size_mb: 35, required: true },
         Spec { id: "ffmpeg", name: "Media tools (FFmpeg)", about: "Reads subtitle and audio tracks out of your video files.", size_mb: 200, required: true },
@@ -152,13 +163,20 @@ fn specs() -> Vec<Spec> {
         Spec {
             id: "whisper-model",
             name: "Speech recognition model",
-            about: if gpu { "large-v3-turbo: accurate, a few minutes per episode on a recent graphics card." } else { "small: lighter model suited to PCs without a graphics card." },
+            about: if gpu { "large-v3-turbo: accurate, a few minutes per episode on a recent graphics card." } else { "small: a quicker download and lighter on the PC, a little less accurate." },
             size_mb: if gpu { 1625 } else { 490 },
             required: false,
         },
         Spec { id: "piper", name: "Voice engine (Piper)", about: "Reads words and lines aloud, offline. Most useful for films in English.", size_mb: 22, required: false },
         Spec { id: "llama", name: "Local LLM engine (llama.cpp)", about: "Runs the explanation model on your own machine. Nothing leaves your PC.", size_mb: 40, required: false },
         Spec { id: "llm-model", name: "Explanation model (Gemma 3 4B)", about: "Explains phrases, idioms and grammar in context, fully offline.", size_mb: 2490, required: false },
+        Spec {
+            id: "llm-model-large",
+            name: "Better model (Gemma 3 12B, optional)",
+            about: "Noticeably better translations and explanations. Needs about 9 GB of free graphics memory; choose it in Settings.",
+            size_mb: 7300,
+            required: false,
+        },
     ]
 }
 
@@ -168,7 +186,7 @@ pub fn dir(state: &AppState, id: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| state.dir.join("components"));
     match id {
-        "whisper-model" | "llm-model" => base.join("models"),
+        "whisper-model" | "llm-model" | "llm-model-large" => base.join("models"),
         id if id.starts_with("dict-") => base.join("dict"),
         id if id.starts_with("voice-") => base.join("voices"),
         other => base.join(other),
@@ -176,15 +194,16 @@ pub fn dir(state: &AppState, id: &str) -> PathBuf {
 }
 
 pub fn whisper_model_name() -> &'static str {
-    if gpu() != Gpu::None { "ggml-large-v3-turbo.bin" } else { "ggml-small.bin" }
+    if !light() { "ggml-large-v3-turbo.bin" } else { "ggml-small.bin" }
 }
 
 /// Alignment-head preset matching the installed Whisper model.
 pub fn whisper_dtw_preset() -> &'static str {
-    if gpu() != Gpu::None { "large.v3.turbo" } else { "small" }
+    if !light() { "large.v3.turbo" } else { "small" }
 }
 
 const LLM_MODEL_FILE: &str = "google_gemma-3-4b-it-Q4_K_M.gguf";
+const LLM_LARGE_FILE: &str = "google_gemma-3-12b-it-Q4_K_M.gguf";
 
 /// Path of an installed component's main file, if present.
 pub fn locate(state: &AppState, id: &str) -> Option<PathBuf> {
@@ -197,6 +216,7 @@ pub fn locate(state: &AppState, id: &str) -> Option<PathBuf> {
         "whisper-model" => Some(d.join(whisper_model_name())).filter(|p| p.exists()),
         "llama" => find_file(&d, "llama-server.exe"),
         "llm-model" => Some(d.join(LLM_MODEL_FILE)).filter(|p| p.exists()),
+        "llm-model-large" => Some(d.join(LLM_LARGE_FILE)).filter(|p| p.exists()),
         id if id.starts_with("dict-") => Some(d.join(format!("{id}.sqlite"))).filter(|p| p.exists()),
         "piper" => find_file(&d, "piper.exe"),
         id if id.starts_with("voice-") => {
@@ -320,6 +340,9 @@ async fn urls(state: &AppState, id: &str) -> anyhow::Result<Vec<String>> {
         "llama" => vec![format!(
             "https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_TAG}/llama-{LLAMA_TAG}-bin-win-vulkan-x64.zip"
         )],
+        "llm-model-large" => vec![format!(
+            "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/main/{LLM_LARGE_FILE}"
+        )],
         "llm-model" => vec![format!(
             "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/{LLM_MODEL_FILE}"
         )],
@@ -407,7 +430,7 @@ pub async fn component_remove(state: State<'_, AppState>, id: String) -> Res<()>
     state.dicts.lock().unwrap().clear();
     match locate(&state, &id) {
         Some(p) if p.starts_with(&state.dir) => {
-            if matches!(id.as_str(), "whisper-model" | "llm-model") || id.starts_with("dict-") {
+            if matches!(id.as_str(), "whisper-model" | "llm-model" | "llm-model-large") || id.starts_with("dict-") {
                 tokio::fs::remove_file(p).await?;
             } else if id.starts_with("voice-") {
                 let _ = tokio::fs::remove_file(p.with_extension("onnx.json")).await;

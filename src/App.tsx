@@ -14,6 +14,8 @@ import { useKeepReady } from "./keepReady";
 import Icon from "./Icon";
 import Backdrop from "./Backdrop";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { Changes, Tour } from "./views/Welcome";
+import { changesSince, Release } from "./changelog";
 
 /** Zoom currently applied to the webview. */
 let zoom = 1;
@@ -26,6 +28,9 @@ type Ctx = {
   setWords: (lemmas: string[], status: number) => void;
   toast: (message: string) => void;
   play: (media: MediaReq) => void;
+  /** Show the welcome tour or the list of changes again. */
+  showTour: () => void;
+  showChanges: () => void;
 };
 
 const AppCtx = createContext<Ctx>(null as unknown as Ctx);
@@ -42,6 +47,8 @@ export default function App() {
   const [update, setUpdate] = useState<Update | null>(null);
   const [updating, setUpdating] = useState(false);
   const [dueCount, setDueCount] = useState(0);
+  const [tour, setTour] = useState(false);
+  const [changes, setChanges] = useState<Release[] | null>(null);
   const queue = useQueue();
   const pending = queue.items.filter((i) => i.state !== "failed").length;
   const busy = queue.items.some((i) => i.state === "working");
@@ -53,6 +60,16 @@ export default function App() {
       const stored = await api.settingsGet();
       const merged: Settings = { ...DEFAULTS, ...stored };
       if (!merged.clientId) merged.clientId = crypto.randomUUID();
+      // First start gets the tour; after an update, the list of what changed.
+      const { version } = await api.info();
+      const existing = !!stored.clientId;
+      if (!merged.tourDone && !existing) setTour(true);
+      else if (merged.lastVersion !== version) {
+        const list = changesSince(merged.lastVersion, version);
+        if (list.length) setChanges(list);
+      }
+      merged.tourDone = true;
+      merged.lastVersion = version;
       setSettings(merged);
       await api.settingsSet(merged);
       const comps = await api.components();
@@ -112,7 +129,14 @@ export default function App() {
   }, []);
 
   const ctx = useMemo<Ctx | null>(
-    () => (settings ? { settings, save, words, setWords, toast, play: setPlaying } : null),
+    () =>
+      settings
+        ? {
+            settings, save, words, setWords, toast, play: setPlaying,
+            showTour: () => setTour(true),
+            showChanges: () => api.info().then(({ version }) => setChanges(changesSince("", version))),
+          }
+        : null,
     [settings, save, words, setWords, toast],
   );
 
@@ -216,6 +240,8 @@ export default function App() {
           </main>
         </div>
       }
+      {tour && !playing && <Tour onClose={() => setTour(false)} />}
+      {changes && !tour && !playing && <Changes releases={changes} onClose={() => setChanges(null)} />}
       {toastMsg && (
         <div className="toast" key={toastMsg}>
           {toastMsg}

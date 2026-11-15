@@ -847,14 +847,14 @@ pub struct MediaStats {
     pub unknown: Vec<UnknownWord>,
 }
 
-fn statuses(state: &AppState, lang: &str) -> anyhow::Result<HashMap<String, i64>> {
+pub fn statuses(state: &AppState, lang: &str) -> anyhow::Result<HashMap<String, i64>> {
     let db = state.db.lock().unwrap();
     let mut st = db.prepare("SELECT lemma, status FROM words WHERE lang=?1")?;
     let rows = st.query_map([lang], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     Ok(rows.flatten().collect())
 }
 
-fn compute_stats(state: &AppState, p: &Prepared, status: &HashMap<String, i64>, detail: bool) -> MediaStats {
+pub fn compute_stats(state: &AppState, p: &Prepared, status: &HashMap<String, i64>, detail: bool) -> MediaStats {
     let mut counts: HashMap<&str, (u32, &str)> = HashMap::new();
     for cue in &p.cues {
         for t in cue.tokens.iter().filter(|t| t.w) {

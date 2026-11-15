@@ -3,12 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  api, Cue, Entry, fmtTime, freqLabel, gradeDictation, lang2, LANGS, Lookup, Mark, MediaReq, MediaStats, MinedLine, Occurrence, plex,
+  api, Cue, Entry, Extras, fmtTime, freqLabel, gradeDictation, lang2, LANGS, Lookup, Mark, MediaReq, MediaStats, MinedLine, Occurrence, plex,
   Prepared, STATUS, SubTrack, tenseNames, TENSES, toRomaji,
 } from "../api";
 import { useApp } from "../App";
 import Icon from "../Icon";
 import Backdrop from "../Backdrop";
+import { ConjugationModal, GrammarModal } from "./Study";
 
 const PANEL_W = 420;
 const TEXT_CODECS = ["subrip", "srt", "ass", "ssa", "mov_text", "tx3g", "webvtt", "vtt", "text"];
@@ -25,7 +26,10 @@ type Popup = {
   phrase?: Entry[];
   explain?: string;
   explaining?: boolean;
+  /** Related words: (word, part of speech, meaning). */
+  family?: [string, string, string][];
 };
+type Loop = { a: number; b: number; slow: boolean };
 type Dictation = { cue: number; input: string; marks?: Mark[] };
 type Elsewhere = { items: Occurrence[]; idx: number; back: number; lemma: string };
 const SUB_MODES = ["full", "focus", "listen", "mixed"];
@@ -90,6 +94,13 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const [ttsOk, setTtsOk] = useState(false);
   const [ttsEn, setTtsEn] = useState(false);
   const [mix, setMix] = useState<[number, number][][]>([]);
+  const [extras, setExtras] = useState<Extras | null>(null);
+  const [grammar, setGrammar] = useState<string | null>(null);
+  const [conj, setConj] = useState<{ lemma: string; form: string } | null>(null);
+  const [loop, setLoop] = useState<Loop | null>(null);
+  const loopStart = useRef<number | null>(null);
+  /** Line whose English is shown even when English is hidden (Q). */
+  const [forceEn, setForceEn] = useState(-1);
 
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(media.duration);
@@ -139,8 +150,8 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const recorder = useRef<MediaRecorder | null>(null);
   // The audio is in another language than the one studied (an English film with French subtitles).
   const foreign = !!prepared?.spoken && prepared.spoken !== prepared.lang;
-  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign, readAloud: false });
-  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign, readAloud: settings.readAloud && ttsOk };
+  const live = useRef({ settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign, readAloud: false, loop: null as Loop | null });
+  live.current = { settings, words, baseSpeed, duration, dictOn, reveal, elsewhere, nextMedia, foreign, readAloud: settings.readAloud && ttsOk, loop };
   const dictInput = useRef<HTMLInputElement>(null);
   const audioApplied = useRef(false);
   const volTimer = useRef<number>();
@@ -369,11 +380,24 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         then();
       }
 
+      const lp = live.current.loop;
+      if (lp && !pausedRef.current && (t >= lp.b || t < lp.a - 1)) {
+        // A-B loop: jump back to the start of the stretch.
+        autoPausedFor.current = -1;
+        holdIdx.current = -1;
+        clock.current = { t: lp.a, stamp: performance.now() };
+        api.mpv("seek", lp.a, "absolute+exact");
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       let idx = cueAt(list, t);
       if (pausedRef.current && holdIdx.current >= 0) idx = holdIdx.current;
       const dictating = live.current.dictOn;
+      const learningLine = (i: number) =>
+        s.pauseLearning && list[i].tokens.some((k) => k.w && k.lemma && live.current.words.get(k.lemma) === 1);
       if (
-        (s.autoPause || dictating || live.current.readAloud) &&
+        !lp &&
+        (s.autoPause || (idx >= 0 && learningLine(idx)) || dictating || live.current.readAloud) &&
         idx >= 0 &&
         !pausedRef.current &&
         !stopAt.current &&
@@ -390,9 +414,10 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
           setDict((d) => (d && d.cue === at && !d.marks ? d : { cue: at, input: "" }));
         } else if (live.current.readAloud) {
           const at = idx;
+          const stay = learningLine(at);
           speakLineRef.current(at, () => {
             // Carry on, unless auto-pause is on or the learner has moved elsewhere meanwhile.
-            if (!live.current.settings.autoPause && holdIdx.current === at && pausedRef.current) api.mpv("set_property", "pause", false);
+            if (!live.current.settings.autoPause && !stay && holdIdx.current === at && pausedRef.current) api.mpv("set_property", "pause", false);
           });
         }
       }
@@ -402,7 +427,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         if (idx >= 0) {
           const w = live.current.words;
           const hard = list[idx].tokens.some((k) => k.w && k.lemma && (w.get(k.lemma) ?? 0) < 2);
-          const want = live.current.baseSpeed * (s.slowUnknown && hard ? s.slowSpeed : 1);
+          const want = live.current.baseSpeed * (live.current.loop?.slow ? 0.7 : s.slowUnknown && hard ? s.slowSpeed : 1);
           if (Math.abs(want - speedRef.current) > 0.01) api.mpv("set_property", "speed", want);
         }
       }
@@ -491,6 +516,58 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     if (i < cuesRef.current.length) playFrom(cuesRef.current[i].start);
   };
   const togglePause = () => api.mpv("set_property", "pause", !pausedRef.current);
+  const startLoop = (a: number, b: number) => {
+    setLoop({ a, b, slow: false });
+    playFrom(a);
+  };
+  const clearLoop = () => {
+    loopStart.current = null;
+    if (loop?.slow) api.mpv("set_property", "speed", baseSpeed);
+    setLoop(null);
+  };
+  const toggleLoopSlow = () => {
+    if (!loop) return;
+    const slow = !loop.slow;
+    setLoop({ ...loop, slow });
+    api.mpv("set_property", "speed", baseSpeed * (slow ? 0.7 : 1));
+  };
+  /** B loops the current line; Shift+B marks a start, then an end, for any stretch. */
+  const loopKey = (manual: boolean) => {
+    if (loop) return clearLoop();
+    if (manual) {
+      if (loopStart.current === null) {
+        loopStart.current = now.current;
+        toast("Loop start marked. Press Shift+B again where it should end.");
+      } else {
+        const a = loopStart.current;
+        const b = now.current;
+        loopStart.current = null;
+        if (b > a + 0.4) startLoop(a, b);
+        else toast("The end has to come after the start.");
+      }
+      return;
+    }
+    const i = currentLine();
+    if (i >= 0) startLoop(Math.max(0, cuesRef.current[i].start - 0.15), cuesRef.current[i].end + 0.2);
+  };
+  /** Q: back to the start of the line, with its English shown even if English is hidden. */
+  const backWithEnglish = () => {
+    const i = currentLine();
+    if (i < 0) return;
+    setForceEn(i);
+    setReveal(i);
+    if (!cuesRef.current[i].en && llm && !translations[i]) translateLine(i);
+    playFrom(cuesRef.current[i].start);
+  };
+  const nudgeSubs = (d: number) => save({ subLift: Math.max(-120, Math.min(420, (settings.subLift || 0) + d)) });
+  const cyclePause = () => {
+    if (!settings.autoPause && !settings.pauseLearning) save({ autoPause: true, pauseLearning: false });
+    else if (settings.autoPause) {
+      save({ autoPause: false, pauseLearning: true });
+      toast("Auto-pause now stops only after lines with a word you are learning.");
+    } else save({ autoPause: false, pauseLearning: false });
+  };
+  const pauseLabel = settings.autoPause ? "every line" : settings.pauseLearning ? "learning words" : "off";
   const changeSpeed = (v: number) => {
     setBaseSpeed(v);
     save({ speed: v });
@@ -545,11 +622,26 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     setPopup(next);
     api
       .lookup(lang, lang === "ja" ? toks[ti].lemma || toks[ti].t : toks[ti].t)
-      .then((lookup) => setPopup((p) => (p === next ? { ...next, lookup } : p)))
+      .then((lookup) => {
+        const withLookup: Popup = { ...next, lookup };
+        setPopup((p) => (p === next ? withLookup : p));
+        const lemma = lookup.lemma || toks[ti].lemma;
+        if (lemma && lang !== "ja" && lookup.entries.length)
+          api.family(lang, lemma).then((family) => setPopup((p) => (p === withLookup ? { ...withLookup, family } : p))).catch(() => {});
+      })
       .catch((err) => toast(String(err)));
   };
   const popupText = popup ? cues[popup.cue].tokens.slice(popup.from, popup.to + 1).map((k) => k.t).join("") : "";
   const popupLemma = popup && popup.from === popup.to ? popup.lookup?.lemma ?? cues[popup.cue].tokens[popup.from].lemma ?? null : null;
+  const popupPhrase = popup && popup.from === popup.to ? (extras?.phrases[popup.cue] || []).find(([a, b]) => popup.from >= a && popup.from <= b) : undefined;
+  const popupVerb = !!popupLemma && lang !== "ja" && !!popup?.lookup?.entries.some((en) => en.pos === "verb");
+  const selectRange = (ci: number, from: number, to: number) => {
+    if (!popup) return;
+    const text = cuesRef.current[ci].tokens.slice(from, to + 1).map((k) => k.t).join("");
+    const next: Popup = { cue: ci, from, to, x: popup.x, y: popup.y };
+    setPopup(next);
+    api.phrase(lang, text).then((phrase) => setPopup((p) => (p === next ? { ...next, phrase } : p)));
+  };
 
   const saveCard = (ci: number, word: string, lemma: string, definition: string, quiet = false) => {
     const cue = cuesRef.current[ci];
@@ -670,6 +762,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     if (next === "mixed")
       toast(`Mixed: the English line, with the words you are learning or know shown in ${LANGS[lang] || lang}. Click one to look it up.`);
   };
+  useEffect(() => {
+    if (phase === "playing" && prepared) api.extras(media.key).then(setExtras).catch(() => setExtras(null));
+  }, [phase, prepared]);
   useEffect(() => {
     if (phase === "playing" && settings.subMode === "mixed") api.mix(media.key).then(setMix).catch(() => setMix([]));
   }, [phase, settings.subMode, prepared]);
@@ -862,6 +957,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {});
   keyHandler.current = (e: KeyboardEvent) => {
     if ((e.target as HTMLElement).tagName === "INPUT" || (e.target as HTMLElement).tagName === "SELECT") return;
+    if (grammar || conj) return;
     if (phase !== "playing") {
       if (e.key === "Escape") exit();
       return;
@@ -875,9 +971,17 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       return;
     }
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (e.shiftKey && (k === "ArrowUp" || k === "ArrowDown")) {
+      e.preventDefault();
+      nudgeSubs(k === "ArrowUp" ? 16 : -16);
+      return;
+    }
     const actions: Record<string, () => void> = {
       " ": togglePause,
       ArrowLeft: prevLine,
+      b: () => loopKey(e.shiftKey),
+      q: backWithEnglish,
+      c: () => save({ genderColors: !settings.genderColors }),
       a: prevLine,
       ArrowRight: nextLine,
       d: nextLine,
@@ -885,7 +989,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       s: replay,
       ArrowUp: () => setReveal((r) => (r === currentLine() ? -1 : currentLine())),
       e: () => setReveal((r) => (r === currentLine() ? -1 : currentLine())),
-      p: () => save({ autoPause: !settings.autoPause }),
+      p: cyclePause,
       t: () => setPanel((x) => (x === "transcript" ? "none" : "transcript")),
       f: toggleFullscreen,
       w: () => {
@@ -907,7 +1011,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
       v: toggleMute,
       "[": () => changeSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(baseSpeed) - 1)] ?? 1),
       "]": () => changeSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(baseSpeed) + 1)] ?? 1),
-      Escape: () => (elsewhere ? closeElsewhere() : popup ? closePopup() : shadow ? setShadow(null) : fullscreen ? toggleFullscreen() : exit()),
+      Escape: () => (elsewhere ? closeElsewhere() : popup ? closePopup() : loop ? clearLoop() : shadow ? setShadow(null) : fullscreen ? toggleFullscreen() : exit()),
     };
     if (actions[k]) {
       e.preventDefault();
@@ -947,6 +1051,13 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
     return "w " + (st === 0 ? "new" : st === 1 ? "learning" : "known");
   };
   const cue = cueIdx >= 0 ? cues[cueIdx] : null;
+  const linePhrases = (cueIdx >= 0 && extras?.phrases[cueIdx]) || [];
+  const lineGenders = new Map(settings.genderColors && cueIdx >= 0 ? extras?.genders[cueIdx] || [] : []);
+  const phraseClass = (i: number) => {
+    const ph = linePhrases.find(([a, b]) => i >= a && i <= b);
+    if (!ph) return "";
+    return " ph" + (i === ph[0] ? " ph-a" : "") + (i === ph[1] ? " ph-b" : "");
+  };
   const english = cue ? cue.en || translations[cueIdx] || "" : "";
   // Mixed subtitles: the English line, with words the learner is learning or knows swapped in.
   const mixedOn = settings.subMode === "mixed" && !!cue && !!cue.en;
@@ -1244,8 +1355,10 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         <div
           className={
             "subs mode-" + (foreign && settings.subMode === "listen" ? "full" : settings.subMode) + (settings.colorWords ? " marks" : "") +
+            " font-" + (settings.subFont || "sans") + (settings.subOutline ? " outlined" : "") +
             (elsewhere || (dictOn && !(dict && dict.marks && dict.cue === cueIdx)) ? " concealed" : "")
           }
+          style={{ "--lift": (settings.subLift || 0) + "px", "--subbg": (settings.subBg ?? 74) / 100 } as React.CSSProperties}
           onMouseEnter={onSubsEnter}
           onMouseLeave={onSubsLeave}
           onClick={(e) => e.stopPropagation()}
@@ -1267,7 +1380,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                     <span
                       key={cueIdx + "-" + i}
                       className={
-                        wordClass(tok.lemma) + (settings.tenseColors && tok.g && TENSES[tok.g] ? " g-" + tok.g : "") + (popup && popup.cue === cueIdx && i >= popup.from && i <= popup.to ? " picked" : "")
+                        wordClass(tok.lemma) + (settings.tenseColors && tok.g && TENSES[tok.g] ? " g-" + tok.g : "") +
+                        (lineGenders.get(i) ? " gen-" + lineGenders.get(i) : "") + phraseClass(i) +
+                        (popup && popup.cue === cueIdx && i >= popup.from && i <= popup.to ? " picked" : "")
                       }
                       data-s={tok.s}
                       data-e={tok.e}
@@ -1283,14 +1398,14 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                       )}
                     </span>
                   ) : (
-                    <span key={cueIdx + "-" + i}>{tok.t}</span>
+                    <span key={cueIdx + "-" + i} className={phraseClass(i).trim() || undefined}>{tok.t}</span>
                   ),
                 )}
               </div>
-              {settings.english !== "hide" && !mixedOn &&
+              {((settings.english !== "hide" && !mixedOn) || forceEn === cueIdx) &&
                 (english ? (
                   <div
-                    className={"line native" + (settings.english === "blur" && reveal !== cueIdx ? " blur" : "")}
+                    className={"line native" + (settings.english === "blur" && reveal !== cueIdx && forceEn !== cueIdx ? " blur" : "")}
                     style={{ fontSize: settings.subSize * 0.62 }}
                     onClick={() => setReveal(cueIdx)}
                   >
@@ -1342,9 +1457,19 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
                 return f ? <div className={"freq f" + f.level}>{"●".repeat(f.level + 1)} {f.label}</div> : null;
               })()}
             {popup.from === popup.to && names && cues[popup.cue].tokens[popup.from].g && (
-              <div className={"tense-line g-" + cues[popup.cue].tokens[popup.from].g}>
+              <button
+                className={"tense-line g-" + cues[popup.cue].tokens[popup.from].g}
+                title="What this tense is for, with examples from your videos"
+                onClick={() => setGrammar(cues[popup.cue].tokens[popup.from].g as string)}
+              >
                 <i /> {(names || {})[cues[popup.cue].tokens[popup.from].g as string] || ""}
-              </div>
+                <span className="more">Grammar note ›</span>
+              </button>
+            )}
+            {popupPhrase && (
+              <button className="phrase-hint" title="Select the whole phrase" onClick={() => selectRange(popup.cue, popupPhrase[0], popupPhrase[1])}>
+                <span className="muted">Part of</span> <b>{popupPhrase[2]}</b> <span className="muted">—</span> {popupPhrase[3]}
+              </button>
             )}
             <div className="popup-body">
               {(popup.from === popup.to ? popup.lookup?.entries : popup.phrase)?.slice(0, 4).map((en, i) => (
@@ -1366,6 +1491,16 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               )}
               {popup.from !== popup.to && popup.phrase && popup.phrase.length === 0 && (
                 <div className="muted">No dictionary entry for this exact phrase{llm ? " — try Explain." : "."}</div>
+              )}
+              {popup.family && popup.family.length > 0 && (
+                <div className="family">
+                  <div className="family-head">Word family</div>
+                  {popup.family.map(([w, pos, g]) => (
+                    <div key={w} className="family-row">
+                      <span className="family-word">{w}</span> <em>{pos}</em> <span className="muted">{g}</span>
+                    </div>
+                  ))}
+                </div>
               )}
               {popup.explaining && <div className="muted">Thinking…</div>}
               {popup.explain && <div className="explain">{popup.explain}</div>}
@@ -1397,6 +1532,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               <button className="small" disabled={!llm || popup.explaining} title={llm ? "" : "Install the explanation model in Setup"} onClick={explain}>
                 <Icon name="sparkles" size={15} /> Explain in context
               </button>
+              {popupVerb && popupLemma && (
+                <button className="small" onClick={() => setConj({ lemma: popupLemma, form: popupText })} title="Conjugation table">
+                  <Icon name="table" size={15} /> Conjugate
+                </button>
+              )}
               {popupLemma && (
                 <button className="small" onClick={() => openElsewhere(popupLemma)} title="Play other scenes from your library where this word is spoken">
                   <Icon name="film" size={15} /> Hear it elsewhere
@@ -1407,6 +1547,20 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               <span className="muted small-text">Shift-click another word to select a phrase</span>
             </div>
           </div>
+        )}
+
+        {grammar && <GrammarModal lang={lang} code={grammar} onClose={() => setGrammar(null)} />}
+        {conj && (
+          <ConjugationModal
+            lang={lang}
+            lemma={conj.lemma}
+            form={conj.form}
+            onClose={() => setConj(null)}
+            onTense={(code) => {
+              setConj(null);
+              setGrammar(code);
+            }}
+          />
         )}
 
         {offer && !offerClosed && !elsewhere && (
@@ -1458,9 +1612,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               {Object.keys(TENSES)
                 .filter((code) => names[code])
                 .map((code) => (
-                  <span key={code} className={"g-" + code}>
+                  <button key={code} className={"g-" + code} onClick={() => setGrammar(code)} title="Grammar note">
                     <i /> {names[code]}
-                  </span>
+                  </button>
                 ))}
             </div>
           )}
@@ -1483,9 +1637,24 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
           </div>
           <div className="control-row">
             <div className="group">
-              <button className={settings.autoPause ? "chip on" : "chip"} onClick={() => save({ autoPause: !settings.autoPause })} title="Pause after every line (P)">
-                Auto-pause
+              <button
+                className={settings.autoPause || settings.pauseLearning ? "chip on" : "chip"}
+                onClick={cyclePause}
+                title="Pause after every line, only after lines with a word you are learning, or never (P)"
+              >
+                Auto-pause: {pauseLabel}
               </button>
+              {loop && (
+                <span className="chip on loop-chip">
+                  <Icon name="repeat" size={14} /> {fmtTime(loop.a)}–{fmtTime(loop.b)}
+                  <button className={loop.slow ? "mini on" : "mini"} onClick={toggleLoopSlow} title="Play the loop slower">
+                    Slow
+                  </button>
+                  <button className="mini" onClick={clearLoop} title="Stop looping (B)">
+                    <Icon name="close" size={12} />
+                  </button>
+                </span>
+              )}
               <button className={settings.slowUnknown ? "chip on" : "chip"} onClick={() => save({ slowUnknown: !settings.slowUnknown })} title="Slow down lines with words you do not know yet">
                 Slow hard lines
               </button>
@@ -1502,6 +1671,11 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               <button className={settings.tenseColors ? "chip on" : "chip"} onClick={() => save({ tenseColors: !settings.tenseColors })} title="Colour verbs by tense (G)">
                 Tenses
               </button>
+              {lang !== "ja" && (
+                <button className={settings.genderColors ? "chip on" : "chip"} onClick={() => save({ genderColors: !settings.genderColors })} title="Colour nouns by gender: blue masculine, pink feminine, green neuter (C)">
+                  Genders
+                </button>
+              )}
               <button className={dictOn ? "chip on" : "chip"} onClick={toggleDictation} title="Dictation: hear each line without subtitles and type what you heard (X)">
                 Dictation
               </button>
@@ -1521,6 +1695,9 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
               </button>
               <button className="icon-btn" onClick={replay} title="Replay this line (S or ↓)">
                 <Icon name="replay" />
+              </button>
+              <button className={loop ? "icon-btn on" : "icon-btn"} onClick={() => loopKey(false)} title="Loop this line (B). Shift+B marks the start and end of any stretch.">
+                <Icon name="repeat" />
               </button>
               <button className="icon-btn play" onClick={togglePause} title="Play / pause (Space)">
                 <Icon name={paused ? "play" : "pause"} size={24} />

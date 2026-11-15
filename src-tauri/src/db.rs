@@ -48,6 +48,7 @@ pub fn settings_get(state: State<AppState>) -> Res<Value> {
 
 #[tauri::command]
 pub fn settings_set(state: State<AppState>, value: Value) -> Res<()> {
+    crate::components::set_light_from(&value);
     let db = state.db.lock().unwrap();
     db.execute(
         "INSERT INTO settings(k,v) VALUES('settings',?1) ON CONFLICT(k) DO UPDATE SET v=?1",

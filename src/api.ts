@@ -126,6 +126,10 @@ export type Occurrence = {
   word: string;
 };
 export type QueueItem = { key: string; title: string; state: "working" | "waiting" | "failed"; error: string; stage: string; pct: number };
+export type Extras = { phrases: [number, number, string, string][][]; genders: [number, string][][] };
+export type Conjugation = { lemma: string; rows: { code: string; cells: string[] }[]; participle: string; gerund: string };
+export type TenseExample = { title: string; text: string; en: string; word: string };
+export type Overview = { key: string; title: string; url: string; known: number; unique: number };
 export type QueueList = { items: QueueItem[]; paused: boolean };
 export type FileEntry = { path: string; name: string; folder: string; key: string };
 export type PlexConn = { name: string; url: string; token: string };
@@ -179,6 +183,27 @@ export type Settings = {
   translateStyle: string;
   /** Ask Plex to download missing subtitles in the studied language. */
   fetchSubs: boolean;
+  /** Colour nouns by grammatical gender. */
+  genderColors: boolean;
+  /** Pause after lines that contain a word you are learning. */
+  pauseLearning: boolean;
+  /** Distance of the subtitles from the bottom edge, in pixels. */
+  subLift: number;
+  /** Opacity of the box behind each subtitle line, 0 to 100. */
+  subBg: number;
+  /** "sans" | "serif" | "bahn" */
+  subFont: string;
+  /** Draw an outline around subtitle letters. */
+  subOutline: boolean;
+  /** "classic" | "cloze" | "listen" | "mixed" */
+  reviewStyle: string;
+  /** "small" (light setup) or "" for the full model. */
+  whisperSize: string;
+  /** "standard" (Gemma 3 4B) or "large" (12B). */
+  llmSize: string;
+  tourDone: boolean;
+  /** Version whose changes were last shown. */
+  lastVersion: string;
 };
 
 export const DEFAULTS: Settings = {
@@ -216,6 +241,17 @@ export const DEFAULTS: Settings = {
   ttsSlow: false,
   translateStyle: "natural",
   fetchSubs: true,
+  genderColors: false,
+  pauseLearning: false,
+  subLift: 0,
+  subBg: 74,
+  subFont: "sans",
+  subOutline: false,
+  reviewStyle: "classic",
+  whisperSize: "",
+  llmSize: "standard",
+  tourDone: false,
+  lastVersion: "",
 };
 
 /** Word status: 0 new, 1 learning, 2 known, 3 ignored (names, noise). */
@@ -249,6 +285,11 @@ export const api = {
   speak: (lang: string, text: string, slow: boolean) => invoke<string>("tts_speak", { lang, text, slow }),
   /** Mixed subtitles: per line, pairs of [English word index, studied-language token index]. */
   mix: (key: string) => invoke<[number, number][][]>("media_mix", { key }),
+  extras: (key: string) => invoke<Extras>("media_extras", { key }),
+  family: (lang: string, lemma: string) => invoke<[string, string, string][]>("dict_family", { lang, lemma }),
+  conjugate: (lang: string, lemma: string) => invoke<Conjugation | null>("dict_conjugate", { lang, lemma }),
+  tenseExamples: (lang: string, code: string) => invoke<TenseExample[]>("tense_examples", { lang, code }),
+  overview: (lang: string) => invoke<Overview[]>("media_overview", { lang }),
   queueRemove: (key: string) => invoke("queue_remove", { key }),
   queueRetry: (key: string) => invoke("queue_retry", { key }),
   queueClear: (failedOnly: boolean) => invoke("queue_clear", { failedOnly }),

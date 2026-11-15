@@ -7,7 +7,7 @@ import Icon from "../Icon";
 type Progress = { id: string; done: number; total: number; stage: string };
 
 export default function Setup({ onDone }: { onDone: () => void }) {
-  const { toast, save } = useApp();
+  const { toast, save, settings } = useApp();
   const [comps, setComps] = useState<Component[]>([]);
   const [progress, setProgress] = useState<Record<string, Progress>>({});
   const [busy, setBusy] = useState<Set<string>>(new Set());
@@ -52,6 +52,24 @@ export default function Setup({ onDone }: { onDone: () => void }) {
   const requiredMissing = missing((c) => c.required);
   const speech = ["whisper", "whisper-model"];
   const llm = ["llama", "llm-model"];
+  const light = settings.whisperSize === "small";
+  const setLight = async (on: boolean) => {
+    const next = { ...settings, whisperSize: on ? "small" : "" };
+    save({ whisperSize: next.whisperSize });
+    await api.settingsSet(next);
+    await refresh();
+  };
+  const sizeOf = (ids: string[]) => comps.filter((c) => ids.includes(c.id) && !c.installed).reduce((n, c) => n + c.size_mb, 0);
+  const fmtSize = (mb: number) => (mb >= 1000 ? (mb / 1000).toFixed(1) + " GB" : mb + " MB");
+  const firstRun = requiredMissing.length > 0 && !comps.some((c) => !c.required && !c.id.startsWith("dict-") && c.installed);
+  const quick = async (full: boolean) => {
+    await setLight(!full);
+    const list = await api.components();
+    const want = list
+      .filter((c) => !c.installed && (c.required || c.id.startsWith("dict-") || speech.includes(c.id) || (full && llm.includes(c.id))))
+      .map((c) => c.id);
+    install(want);
+  };
   const group = (title: string, blurb: string, list: Component[], action?: JSX.Element) => (
     <section className="card">
       <div className="row">
@@ -116,6 +134,25 @@ export default function Setup({ onDone }: { onDone: () => void }) {
       <p className="muted">
         LingoReel downloads its engines and data once, then works offline. Everything is stored on this PC.
       </p>
+      {firstRun && comps.length > 0 && (
+        <section className="card quick">
+          <h2>Choose how to start</h2>
+          <div className="quick-grid">
+            <button className="quick-opt" onClick={() => quick(false)}>
+              <Icon name="bolt" size={22} />
+              <strong>Light setup</strong>
+              <span className="muted">Player, dictionary and a small speech model. Add the rest any time.</span>
+              <em>about {fmtSize(sizeOf(comps.filter((c) => c.required || c.id.startsWith("dict-") || c.id === "whisper").map((c) => c.id)) + 490)}</em>
+            </button>
+            <button className="quick-opt" onClick={() => quick(true)}>
+              <Icon name="sparkles" size={22} />
+              <strong>Full setup</strong>
+              <span className="muted">Best word timing on your graphics card plus the explanation model.</span>
+              <em>about {fmtSize(sizeOf(comps.filter((c) => c.required || c.id.startsWith("dict-") || llm.includes(c.id) || c.id === "whisper").map((c) => c.id)) + 1620)}</em>
+            </button>
+          </div>
+        </section>
+      )}
       {group(
         "Required",
         "The player, subtitle reader and dictionary.",
@@ -126,12 +163,22 @@ export default function Setup({ onDone }: { onDone: () => void }) {
         "Word-by-word timing",
         "Listens to each video once so every word lights up exactly when it is spoken, fixes badly timed subtitles, and can write subtitles when a video has none.",
         comps.filter((c) => speech.includes(c.id)),
-        allBtn(missing((c) => speech.includes(c.id)), "Download both"),
+        <div className="row">
+          <div className="seg">
+            <button className={light ? "" : "on"} onClick={() => setLight(false)} title="Large model: the most accurate timing, runs on your graphics card">
+              Accurate
+            </button>
+            <button className={light ? "on" : ""} onClick={() => setLight(true)} title="Small model: a quicker download and lighter on the PC">
+              Light
+            </button>
+          </div>
+          {allBtn(missing((c) => speech.includes(c.id)), "Download both")}
+        </div>,
       )}
       {group(
         "Phrase explanations (optional)",
         "A small language model that runs on your own graphics card to explain idioms and grammar. No internet or account needed once downloaded.",
-        comps.filter((c) => llm.includes(c.id)),
+        comps.filter((c) => llm.includes(c.id) || c.id === "llm-model-large"),
         allBtn(missing((c) => llm.includes(c.id)), "Download both"),
       )}
       {comps.some((c) => c.id === "piper") &&

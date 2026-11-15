@@ -11,19 +11,28 @@ plain folders of video files.
 
 Download `LingoReel_x.y.z_x64-setup.exe` from the
 [latest release](https://github.com/JustSad42/LingoReel/releases/latest) and run it.
-No administrator rights are needed. On first start the Setup screen downloads the
-player engine, dictionary and (optionally) speech recognition and a local language
-model. After that the app works offline and updates itself.
+No administrator rights are needed. On first start a short tour explains the app, and the
+Setup screen downloads the player engine, dictionary and (optionally) speech recognition
+and a local language model. Choose Light setup for a smaller first download. After that
+the app works offline, updates itself and shows what changed.
 
 ## What it does
 
 - **Two subtitle lines** – target language and English together; English can be shown, blurred until asked for, or hidden.
 - **Word-by-word timing** – Whisper listens to each video once on your GPU, so every word highlights when spoken and badly timed subtitle files are corrected. Videos with no subtitles get them written from the audio.
 - **Click-to-look-up** – offline dictionary (Wiktionary) with the base form, grammar of the form you clicked, gender, pronunciation and how common the word is.
-- **Line navigation** – replay, previous and next line, auto-pause after each line, pause on hover, slow down lines with unknown words.
+- **Line navigation** – replay, previous and next line, pause on hover, slow down lines with unknown words. Auto-pause after every line, or only after lines with a word you are learning. Q jumps back to the start of the line and shows its English even when English is hidden.
+- **Loop** – loop the current line, or any stretch you mark, and play it slower.
+- **Set phrases** – expressions such as « en train de » or « sin embargo » are dotted underneath; a word's popup gives the meaning of the whole phrase.
+- **Conjugation tables** – every tense of a verb, from its popup, with the form you heard highlighted.
+- **Grammar notes** – what each tense is for and how it is built, with lines from your own videos that use it.
+- **Word families** – related words built on the same root, in the popup.
+- **Gender colours** – nouns tinted blue (masculine), pink (feminine) or green (neuter); can be switched off.
+- **Subtitle style** – move the subtitles up or down, change the font and the box behind them, or outline the letters.
 - **Known-word tracking** – words are underlined by how well you know them; every video gets a "percent known" difficulty score and a list of words to study first.
-- **Review** – save words or whole lines; each keeps a short clip of the scene and comes back on a spaced-repetition schedule (FSRS).
-- **Phrase explanations** – a small model running on your own PC explains idioms and grammar in context. Nothing is sent to a cloud service.
+- **Review** – save words or whole lines; each keeps a short clip of the scene and comes back on a spaced-repetition schedule (FSRS). Cards can be classic, fill in the missing word, or listen first and read after.
+- **For your level** – the Library suggests prepared videos where you already know most of the words.
+- **Phrase explanations** – a small model running on your own PC explains idioms and grammar in context. Nothing is sent to a cloud service. A larger optional model (Gemma 3 12B) gives better translations and explanations on graphics cards with about 9 GB free.
 - **Shadowing** – hear a line, record yourself, and see which words were recognised.
 - **Subtitle modes** – show every word, dim the words you know so new ones stand out, or reveal the line only after it has been spoken.
 - **Dictation** – hear a line with no subtitles, type what you heard, and see which words you got.
@@ -60,7 +69,11 @@ speed, volume and last library.
 | S or ↓ | Replay line |
 | D or → | Next line |
 | E or ↑ | Reveal the English line |
-| P | Auto-pause after each line |
+| Q | Back to the start of the line, with its English |
+| B | Loop the line (Shift+B: mark start, then end) |
+| P | Auto-pause: every line, learning words, off |
+| C | Gender colours |
+| Shift+↑ / ↓ | Move the subtitles up / down |
 | T | Transcript panel |
 | W | Save the line for review |
 | R | Shadowing |
