@@ -7,6 +7,19 @@ learning and in English at the same time, lights up each word as it is spoken, a
 lets you click any word for its meaning. It plays from your Plex library or from
 plain folders of video files.
 
+![LingoReel player: French and English subtitles, words underlined by tense, and the dictionary popup for a clicked word](docs/screenshots/player.png)
+
+## How it works
+
+| | |
+|---|---|
+| ![The library with posters and "For your level" picks](docs/screenshots/library.webp) | ![Two subtitle lines over the video](docs/screenshots/player-subs.png) |
+| **1. Pick something to watch** from Plex or a folder. "For your level" suggests prepared videos where you already know most of the words. | **2. Watch with two subtitle lines.** Each word lights up as it is spoken; click one for its meaning and grammar (as in the picture at the top), then save it for review. |
+| ![A review card with the scene, sentence and answer buttons](docs/screenshots/review.webp) | ![The vocabulary page with known and learning words](docs/screenshots/words.webp) |
+| **3. Review saved words** as cards with the scene they came from. | **4. Track your vocabulary.** Known words stop being highlighted, so subtitles show what is new to you. |
+
+The titles, posters and subtitles in these screenshots are made up.
+
 ## Install
 
 Download `LingoReel_x.y.z_x64-setup.exe` from the
