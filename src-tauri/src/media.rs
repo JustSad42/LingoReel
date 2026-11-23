@@ -591,7 +591,7 @@ async fn prepare_in(app: &AppHandle, state: &AppState, req: &MediaReq, opts: &Pr
         subs_out.push((i, &n_srt));
     }
     let map = audio.map(|a| format!("0:{}", a.index)).unwrap_or_else(|| "0:a:0".into());
-    extract(app, state, req, &subs_out, listen.then(|| (map, wav.as_path()))).await?;
+    extract(app, state, req, &subs_out, listen.then_some((map, wav.as_path()))).await?;
 
     let mut cues = read_track(state, target, &t_srt, tmp).await.context("reading target-language subtitles")?;
     let native_cues = read_track(state, native, &n_srt, tmp).await.unwrap_or_default();
@@ -723,7 +723,7 @@ async fn prepare_foreign(
         subs_out.push((i, &s_srt));
     }
     let map = audio.map(|a| format!("0:{}", a.index)).unwrap_or_else(|| "0:a:0".into());
-    extract(app, state, req, &subs_out, listen.then(|| (map, wav.as_path()))).await?;
+    extract(app, state, req, &subs_out, listen.then_some((map, wav.as_path()))).await?;
 
     let mut cues = read_track(state, target, &t_srt, tmp).await.context("reading target-language subtitles")?;
     let mut reference = read_track(state, source, &s_srt, tmp).await.unwrap_or_default();
@@ -1108,7 +1108,7 @@ pub async fn scan_folder(path: String) -> Res<Vec<FileEntry>> {
         let root = PathBuf::from(&path);
         let mut out = vec![];
         walk(&root, &root, &mut out, 0);
-        out.sort_by(|a, b| (a.folder.to_lowercase(), a.name.to_lowercase()).cmp(&(b.folder.to_lowercase(), b.name.to_lowercase())));
+        out.sort_by_key(|a| (a.folder.to_lowercase(), a.name.to_lowercase()));
         out
     })
     .await?;

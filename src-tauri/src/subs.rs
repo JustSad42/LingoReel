@@ -251,7 +251,7 @@ pub fn tokenize(lang: &str, text: &str, dict: Option<&mut Dict>) -> Vec<Tok> {
             first = false;
         }
     }
-    if let Some(d) = dict.as_deref_mut() {
+    if let Some(d) = dict {
         for t in out.iter_mut().filter(|t| t.w) {
             t.lemma = d.lemma(&t.t);
         }
