@@ -6,13 +6,76 @@ use anyhow::{anyhow, bail, Context};
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::AsyncWriteExt;
 
-const DATA_RELEASE: &str = "https://github.com/JustSad42/LingoReel/releases/download/data-v1";
 const WHISPER_RELEASE: &str = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2";
 const LLAMA_TAG: &str = "b12304";
+const WHISPER_MODELS: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
+const LLM_REPO: &str = "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/71506238f970075ca85125cd749c28b1b0eee84e";
+const LLM_LARGE_REPO: &str = "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4";
+
+/// SHA-256 of every file with a fixed version, by file name. Most of these are programs we then run:
+/// nothing is used unless it matches. Update the hash together with the version it belongs to.
+const PINNED: &[(&str, &str)] = &[
+    ("whisper-bin-x64.zip", "49dcc16de826f20bd53d44f947a1ae49dfa81f86cad67a64d80820cb192d674a"),
+    ("whisper-cublas-12.4.0-bin-x64.zip", "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c"),
+    ("llama-b12304-bin-win-vulkan-x64.zip", "d8b990953aca480412581521045a52f7263db84c5f2cbb89ada9aa47413ce6b1"),
+    ("piper_windows_amd64.zip", "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea"),
+    ("ggml-large-v3-turbo.bin", "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"),
+    ("ggml-small.bin", "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"),
+    ("google_gemma-3-4b-it-Q4_K_M.gguf", "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94"),
+    ("google_gemma-3-12b-it-Q4_K_M.gguf", "fc57f67efa46d711c346e587cbef7d049e95f3df8db2eb2271153343ef0acc7b"),
+    ("fr_FR-siwis-medium.onnx", "641d1ab097da2b81128c076810edb052b385decc8be3381814802a64a73baf99"),
+    ("fr_FR-siwis-medium.onnx.json", "39479916c2db192b5ac9764daddd0c744d83e023ad890c6976c0633ae4df8959"),
+    ("es_ES-davefx-medium.onnx", "6658b03b1a6c316ee4c265a9896abc1393353c2d9e1bca7d66c2c442e222a917"),
+    ("es_ES-davefx-medium.onnx.json", "0e0dda87c732f6f38771ff274a6380d9252f327dca77aa2963d5fbdf9ec54842"),
+    ("de_DE-thorsten-medium.onnx", "7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819"),
+    ("de_DE-thorsten-medium.onnx.json", "974adee790533adb273a1ac88f49027d2a1b8f0f2cf4905954a4791e79264e85"),
+    ("it_IT-paola-medium.onnx", "6fc918b5a0ea6137382833dddfa567bffbe6a5060c02043c87192ee59c04210c"),
+    ("it_IT-paola-medium.onnx.json", "aea19c0a7fce29fbc359b93f10e7902854401e4c95ae2ea328ae516b15d296cf"),
+    ("pt_BR-faber-medium.onnx", "858555e3a064209c57088fe6bd70c4c3dc54d03eaa00c45d5ecaf43a33f95aa7"),
+    ("pt_BR-faber-medium.onnx.json", "7e694de195ae3fc36dd732c445eb04fb49b649854893cb5506b978f0d50a1d6f"),
+    ("en_US-lessac-medium.onnx", "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"),
+    ("en_US-lessac-medium.onnx.json", "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"),
+];
+
+/// A file to fetch and the SHA-256 it must have.
+struct Source {
+    url: String,
+    sha256: String,
+}
+
+fn pinned(url: String) -> anyhow::Result<Source> {
+    let name = url.rsplit('/').next().unwrap_or_default();
+    let sha256 = PINNED.iter().find(|p| p.0 == name).map(|p| p.1.to_string()).with_context(|| format!("no checksum recorded for {name}"))?;
+    Ok(Source { url, sha256 })
+}
+
+/// A file from a release whose files change over time (mpv, FFmpeg, our own data release):
+/// checked against the SHA-256 GitHub publishes for it.
+async fn released(state: &AppState, repo: &str, release: &str, wanted: impl Fn(&str) -> bool) -> anyhow::Result<Source> {
+    let rel: serde_json::Value = state
+        .http
+        .get(format!("https://api.github.com/repos/{repo}/releases/{release}"))
+        .header("User-Agent", "LingoReel")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    pick_asset(&rel, wanted).with_context(|| format!("no verifiable download found in {repo} ({release})"))
+}
+
+fn pick_asset(release: &serde_json::Value, wanted: impl Fn(&str) -> bool) -> Option<Source> {
+    let asset = release["assets"].as_array()?.iter().find(|a| a["name"].as_str().is_some_and(&wanted))?;
+    Some(Source {
+        url: asset["browser_download_url"].as_str()?.to_string(),
+        sha256: asset["digest"].as_str()?.strip_prefix("sha256:")?.to_lowercase(),
+    })
+}
 
 #[derive(Serialize, Clone)]
 pub struct Component {
@@ -300,71 +363,54 @@ pub fn components_status(state: State<AppState>) -> Res<Vec<Component>> {
     Ok(out)
 }
 
-/// Download URL(s) for a component. mpv builds are published daily and old ones are
-/// removed, so that one is resolved through the GitHub API at install time.
-async fn urls(state: &AppState, id: &str) -> anyhow::Result<Vec<String>> {
+/// A file from this repository's own data release.
+async fn ours(state: &AppState, name: &str) -> anyhow::Result<Source> {
+    released(state, "JustSad42/LingoReel", "tags/data-v1", |n| n == name).await
+}
+
+/// The file(s) to download for a component. mpv builds are published daily and old ones are
+/// removed, so that one (like FFmpeg) is resolved through the GitHub API at install time.
+async fn sources(state: &AppState, id: &str) -> anyhow::Result<Vec<Source>> {
     Ok(match id {
-        "mpv" => {
-            let rel: serde_json::Value = state
-                .http
-                .get("https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest")
-                .header("User-Agent", "LingoReel")
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            let url = rel["assets"]
-                .as_array()
-                .and_then(|a| {
-                    a.iter().find_map(|x| {
-                        let n = x["name"].as_str()?;
-                        let plain = n.starts_with("mpv-x86_64-2") && n.ends_with(".7z");
-                        plain.then(|| x["browser_download_url"].as_str().map(String::from)).flatten()
-                    })
-                })
-                .context("no mpv build found in the latest release")?;
-            vec![url]
-        }
-        "ffmpeg" => vec!["https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".into()],
+        "mpv" => vec![released(state, "shinchiro/mpv-winbuild-cmake", "latest", |n| n.starts_with("mpv-x86_64-2") && n.ends_with(".7z")).await?],
+        "ffmpeg" => vec![released(state, "BtbN/FFmpeg-Builds", "tags/latest", |n| n == "ffmpeg-master-latest-win64-gpl.zip").await?],
         "whisper" => vec![match gpu() {
-            Gpu::Nvidia => format!("{WHISPER_RELEASE}/whisper-cublas-12.4.0-bin-x64.zip"),
+            Gpu::Nvidia => pinned(format!("{WHISPER_RELEASE}/whisper-cublas-12.4.0-bin-x64.zip"))?,
             // Upstream publishes no Vulkan build for Windows; ours is built by a workflow in this repository.
-            Gpu::Vulkan => format!("{DATA_RELEASE}/whisper-vulkan-bin-x64.zip"),
-            Gpu::None => format!("{WHISPER_RELEASE}/whisper-bin-x64.zip"),
+            Gpu::Vulkan => ours(state, "whisper-vulkan-bin-x64.zip").await?,
+            Gpu::None => pinned(format!("{WHISPER_RELEASE}/whisper-bin-x64.zip"))?,
         }],
-        "whisper-model" => vec![format!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-            whisper_model_name()
-        )],
-        "llama" => vec![format!(
+        "whisper-model" => vec![pinned(format!("{WHISPER_MODELS}/{}", whisper_model_name()))?],
+        "llama" => vec![pinned(format!(
             "https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_TAG}/llama-{LLAMA_TAG}-bin-win-vulkan-x64.zip"
-        )],
-        "llm-model-large" => vec![format!(
-            "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/main/{LLM_LARGE_FILE}"
-        )],
-        "llm-model" => vec![format!(
-            "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/{LLM_MODEL_FILE}"
-        )],
-        id if id.starts_with("dict-") => vec![format!("{DATA_RELEASE}/{id}.sqlite.gz")],
-        "piper" => vec![PIPER_URL.into()],
+        ))?],
+        "llm-model-large" => vec![pinned(format!("{LLM_LARGE_REPO}/{LLM_LARGE_FILE}"))?],
+        "llm-model" => vec![pinned(format!("{LLM_REPO}/{LLM_MODEL_FILE}"))?],
+        id if id.starts_with("dict-") => vec![ours(state, &format!("{id}.sqlite.gz")).await?],
+        "piper" => vec![pinned(PIPER_URL.into())?],
         id if id.starts_with("voice-") => {
             let (_, folder, file) = voice(id).context("no voice for this language")?;
-            vec![format!("{VOICE_BASE}/{folder}/{file}.onnx"), format!("{VOICE_BASE}/{folder}/{file}.onnx.json")]
+            vec![pinned(format!("{VOICE_BASE}/{folder}/{file}.onnx"))?, pinned(format!("{VOICE_BASE}/{folder}/{file}.onnx.json"))?]
         }
         _ => bail!("unknown component {id}"),
     })
 }
 
-async fn download(app: &AppHandle, state: &AppState, id: &str, url: &str, dest: &Path) -> anyhow::Result<()> {
-    let resp = state.http.get(url).header("User-Agent", "LingoReel").send().await?.error_for_status()?;
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+async fn download(app: &AppHandle, state: &AppState, id: &str, source: &Source, dest: &Path) -> anyhow::Result<()> {
+    let resp = state.http.get(&source.url).header("User-Agent", "LingoReel").send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
     let part = dest.with_extension("part");
     let mut file = tokio::fs::File::create(&part).await?;
     let mut stream = resp.bytes_stream();
+    let mut hash = Sha256::new();
     let (mut done, mut last_emit) = (0u64, 0u64);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        hash.update(&chunk);
         file.write_all(&chunk).await?;
         done += chunk.len() as u64;
         if done - last_emit > 2_000_000 {
@@ -374,6 +420,11 @@ async fn download(app: &AppHandle, state: &AppState, id: &str, url: &str, dest: 
     }
     file.flush().await?;
     drop(file);
+    let got = hex(&hash.finalize());
+    if got != source.sha256 {
+        let _ = tokio::fs::remove_file(&part).await;
+        bail!("it doesn't match its published checksum, so it was discarded");
+    }
     tokio::fs::rename(&part, dest).await?;
     Ok(())
 }
@@ -382,11 +433,11 @@ async fn download(app: &AppHandle, state: &AppState, id: &str, url: &str, dest: 
 pub async fn component_install(app: AppHandle, state: State<'_, AppState>, id: String) -> Res<()> {
     let target = dir(&state, &id);
     tokio::fs::create_dir_all(&target).await?;
-    for url in urls(&state, &id).await? {
-        let file_name = url.rsplit('/').next().unwrap_or("download").to_string();
+    for source in sources(&state, &id).await? {
+        let file_name = source.url.rsplit('/').next().unwrap_or("download").to_string();
         let is_archive = file_name.ends_with(".zip") || file_name.ends_with(".7z");
         let dest = target.join(&file_name);
-        download(&app, &state, &id, &url, &dest)
+        download(&app, &state, &id, &source, &dest)
             .await
             .with_context(|| format!("downloading {file_name}"))?;
         let _ = app.emit("component-progress", json!({"id": id, "done": 1, "total": 1, "stage": "unpack"}));
@@ -442,4 +493,36 @@ pub async fn component_remove(state: State<'_, AppState>, id: String) -> Res<()>
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_fixed_file_has_a_checksum() {
+        for (name, sha) in PINNED {
+            assert!(sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+        }
+        for (_, folder, file) in VOICES {
+            assert!(pinned(format!("{VOICE_BASE}/{folder}/{file}.onnx")).is_ok());
+            assert!(pinned(format!("{VOICE_BASE}/{folder}/{file}.onnx.json")).is_ok());
+        }
+        for file in [LLM_MODEL_FILE, LLM_LARGE_FILE, "ggml-small.bin", "ggml-large-v3-turbo.bin", "whisper-bin-x64.zip", "whisper-cublas-12.4.0-bin-x64.zip"] {
+            assert!(pinned(file.to_string()).is_ok(), "{file}");
+        }
+        assert!(pinned(PIPER_URL.to_string()).is_ok());
+        assert!(pinned(format!("llama-{LLAMA_TAG}-bin-win-vulkan-x64.zip")).is_ok());
+        assert!(pinned("https://example.com/other.zip".into()).is_err());
+    }
+
+    #[test]
+    fn release_files_without_a_digest_are_refused() {
+        let rel = json!({"assets": [
+            {"name": "a.zip", "browser_download_url": "u/a.zip", "digest": null},
+            {"name": "b.zip", "browser_download_url": "u/b.zip", "digest": "sha256:AB"},
+        ]});
+        assert!(pick_asset(&rel, |n| n == "a.zip").is_none());
+        assert_eq!(pick_asset(&rel, |n| n == "b.zip").unwrap().sha256, "ab");
+    }
 }

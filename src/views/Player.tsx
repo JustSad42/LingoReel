@@ -344,14 +344,21 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
   useEffect(() => {
     if (phase !== "playing") return;
     let raf = 0;
+    let idle = 0;
     let lastUi = 0;
+    // Every frame while playing; ten times a second while paused, which is enough to follow a seek.
+    const next = () => {
+      const frame = () => (raf = requestAnimationFrame(tick));
+      if (pausedRef.current) idle = window.setTimeout(frame, 100);
+      else frame();
+    };
     const tick = () => {
       const c = clock.current;
       let t = c.t;
       if (!pausedRef.current) t += ((performance.now() - c.stamp) / 1000) * speedRef.current;
       if (live.current.elsewhere) {
         // Another video's scene is playing; leave this video's subtitles and position alone.
-        raf = requestAnimationFrame(tick);
+        next();
         return;
       }
       now.current = t;
@@ -387,7 +394,7 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         holdIdx.current = -1;
         clock.current = { t: lp.a, stamp: performance.now() };
         api.mpv("seek", lp.a, "absolute+exact");
-        raf = requestAnimationFrame(tick);
+        next();
         return;
       }
       let idx = cueAt(list, t);
@@ -448,10 +455,13 @@ export default function Player({ media, onExit }: { media: MediaReq; onExit: () 
         lastUi = performance.now();
         setUiTime(t);
       }
-      raf = requestAnimationFrame(tick);
+      next();
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(idle);
+    };
   }, [phase]);
 
   // Save position regularly and on exit.
